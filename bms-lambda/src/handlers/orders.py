@@ -91,7 +91,15 @@ def create_order(body: str, user_id: str) -> Dict[str, Any]:
         show = db_service.get_show_by_id(show_id)
         if not show:
             return create_error_response(404, "Show not found")
-        
+
+        # CRITICAL: Double-check seats aren't already confirmed (race condition protection)
+        confirmed_seats = db_service.get_confirmed_seats_for_show(show_id)
+        seats_already_booked = [s for s in hold_data['seat_ids'] if s in confirmed_seats]
+        if seats_already_booked:
+            # Release the hold since seats are no longer available
+            redis_service.release_seats_atomic(show_id, user_id, hold_data['seat_ids'])
+            return create_error_response(409, f"Seats already booked by another user: {', '.join(seats_already_booked)}")
+
         # Calculate amount
         seat_count = len(hold_data['seat_ids'])
         price_per_seat = float(show['price']) if show.get('price') else 0

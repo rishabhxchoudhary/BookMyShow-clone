@@ -83,13 +83,23 @@ def create_hold(body: str, user_id: str) -> Dict[str, Any]:
         if show_time and datetime.now(timezone.utc) >= show_time:
             return create_error_response(400, "Cannot book seats for a show that has already started")
         
-        # Get permanently unavailable seats for this show
+        # Get permanently unavailable seats for this show (broken, maintenance)
         permanently_unavailable = get_permanently_unavailable_seats(show_id)
-        
-        # Check if any requested seats are permanently unavailable
-        unavailable_seats = [seat for seat in seat_ids if seat in permanently_unavailable]
+
+        # Get confirmed seats from database (already booked)
+        confirmed_seats = db_service.get_confirmed_seats_for_show(show_id)
+
+        # Combine all unavailable seats
+        all_unavailable = set(permanently_unavailable + confirmed_seats)
+
+        # Check if any requested seats are unavailable
+        unavailable_seats = [seat for seat in seat_ids if seat in all_unavailable]
         if unavailable_seats:
-            return create_error_response(400, f"Seats are permanently unavailable: {', '.join(unavailable_seats)}")
+            # Check if they're confirmed (already booked) vs permanently unavailable
+            booked_seats = [s for s in unavailable_seats if s in confirmed_seats]
+            if booked_seats:
+                return create_error_response(409, f"Seats already booked: {', '.join(booked_seats)}")
+            return create_error_response(400, f"Seats are unavailable: {', '.join(unavailable_seats)}")
         
         # Generate hold ID
         hold_id = str(uuid.uuid4())
