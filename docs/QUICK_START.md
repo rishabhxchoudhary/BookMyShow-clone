@@ -1,17 +1,35 @@
 # 🚀 Quick Start Guide - BookMyShow Clone
 
+> **Last Updated**: December 2025 | **Status**: Production Ready
+
 ## Overview
 This guide will help you set up the complete BookMyShow clone with AWS Lambda backend and Next.js frontend in under 30 minutes.
 
+## Live Production Environment
+- **API Gateway**: `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/`
+- **Database**: PostgreSQL RDS (ap-south-1)
+- **Cache**: Redis Labs
+
 ## Prerequisites
-- AWS Account with CLI configured
-- Node.js 18+
-- PostgreSQL database (AWS RDS or local)
-- Redis instance (Redis Labs or AWS ElastiCache)
+- AWS Account with CLI configured (`aws configure`)
+- Node.js 18+ and npm
+- SAM CLI (`brew install aws-sam-cli`)
+- PostgreSQL client (optional, for database access)
 
 ## 🏗️ Architecture
 ```
-Next.js Frontend → AWS API Gateway → Lambda Functions → PostgreSQL + Redis
+┌─────────────┐     ┌─────────────────┐     ┌──────────────────────────────┐
+│   Next.js   │────▶│   AWS API       │────▶│   AWS Lambda Functions       │
+│  Frontend   │     │   Gateway       │     │  (movies, seats, holds,      │
+│  (port 3000)│     │                 │     │   orders, events)            │
+└─────────────┘     └─────────────────┘     └──────────────┬───────────────┘
+                                                           │
+                                            ┌──────────────┼───────────────┐
+                                            ▼              ▼               ▼
+                                      ┌──────────┐  ┌───────────┐  ┌───────────┐
+                                      │PostgreSQL│  │   Redis   │  │  AWS SQS  │
+                                      │   RDS    │  │   Labs    │  │  Events   │
+                                      └──────────┘  └───────────┘  └───────────┘
 ```
 
 ## 📋 Step-by-Step Setup
@@ -66,66 +84,84 @@ aws cloudformation describe-stacks --stack-name bms-lambda --query 'Stacks[0].Ou
 
 ### 3. Database Setup
 
-#### PostgreSQL Tables
+> **Note**: The production database is already set up. These schemas are for reference or new environments.
+
+#### PostgreSQL Tables (Production Schema)
 ```sql
 -- Connect to your PostgreSQL database and run:
 
+-- 1. Movies table - stores movie catalog
 CREATE TABLE movies (
-    movie_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    title VARCHAR(255) NOT NULL,
-    about TEXT,
+    movie_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title         VARCHAR(255) NOT NULL,
+    about         TEXT,
     thumbnail_url TEXT,
-    rating NUMERIC(3,1),
+    rating        NUMERIC(3,1),
     duration_mins INTEGER,
-    age_rating VARCHAR(10),
-    release_date DATE,
-    language VARCHAR(50),
-    format VARCHAR(20),
-    genres TEXT[],
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    age_rating    VARCHAR(10),
+    release_date  DATE,
+    language      VARCHAR(50),
+    format        VARCHAR(20),
+    genres        TEXT[],
+    created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 2. Theatres table - stores cinema hall info
 CREATE TABLE theatres (
-    theatre_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL,
-    address TEXT,
-    geo_lat DECIMAL(10, 8),
-    geo_lng DECIMAL(11, 8),
+    theatre_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                  VARCHAR(255) NOT NULL,
+    address               TEXT,
+    geo_lat               DECIMAL(10, 8),
+    geo_lng               DECIMAL(11, 8),
     cancellation_available BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at            TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 3. Shows table - links movies to theatres with timing
 CREATE TABLE shows (
-    show_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    movie_id UUID REFERENCES movies(movie_id),
-    theatre_id UUID REFERENCES theatres(theatre_id),
-    start_time TIMESTAMP WITH TIME ZONE,
-    price DECIMAL(10, 2),
-    status VARCHAR(20) DEFAULT 'active',
+    show_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    movie_id   UUID NOT NULL REFERENCES movies(movie_id),
+    theatre_id UUID NOT NULL REFERENCES theatres(theatre_id),
+    start_time TIMESTAMP WITH TIME ZONE NOT NULL,
+    price      NUMERIC(10, 2) NOT NULL,
+    status     VARCHAR(20) DEFAULT 'AVAILABLE',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Indexes for show queries
+CREATE INDEX idx_shows_movie_date ON shows(movie_id, start_time);
+CREATE INDEX idx_shows_theatre ON shows(theatre_id, start_time);
+
+-- 4. Orders table - stores ticket bookings
 CREATE TABLE orders (
-    order_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    show_id UUID REFERENCES shows(show_id),
-    user_id VARCHAR(255),
-    seat_ids TEXT[],
-    total_amount DECIMAL(10, 2),
-    status VARCHAR(20) DEFAULT 'pending',
-    customer_name VARCHAR(255),
+    order_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        VARCHAR(255) NOT NULL,
+    show_id        UUID NOT NULL REFERENCES shows(show_id),
+    seat_ids       TEXT[] NOT NULL,
+    customer_name  VARCHAR(255),
     customer_email VARCHAR(255),
     customer_phone VARCHAR(20),
-    payment_method VARCHAR(50),
-    payment_id VARCHAR(255),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    confirmed_at TIMESTAMP WITH TIME ZONE
+    amount         NUMERIC(10, 2) NOT NULL,
+    status         VARCHAR(20) NOT NULL DEFAULT 'PAYMENT_PENDING',
+    ticket_code    VARCHAR(50),
+    created_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    confirmed_at   TIMESTAMP WITH TIME ZONE,
+    expires_at     TIMESTAMP WITH TIME ZONE
 );
 
+-- Indexes for order queries
+CREATE INDEX idx_orders_user ON orders(user_id, created_at DESC);
+CREATE INDEX idx_orders_show_status ON orders(show_id, status);
+
+-- 5. Seat layouts table (optional - seats generated dynamically)
 CREATE TABLE seat_layouts (
-    layout_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    theatre_id UUID REFERENCES theatres(theatre_id),
-    layout_data JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    layout_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    theatre_id  UUID REFERENCES theatres(theatre_id),
+    screen_name VARCHAR(50),
+    rows        INTEGER,
+    cols        INTEGER,
+    layout_json JSONB,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 ```
 
@@ -175,17 +211,30 @@ Visit `http://localhost:3000` to see your application!
 
 ### 1. Test Lambda API Directly
 ```bash
-# Test movies endpoint
-curl "https://your-api-gateway-url/prod/movies?limit=5"
+# Base URL
+API_URL="https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod"
 
-# Test seat map endpoint (replace with your show ID)
-curl "https://your-api-gateway-url/prod/shows/550e8400-e29b-41d4-a716-446655440021/seatmap"
+# Test movies endpoint
+curl "$API_URL/movies"
+
+# Test seat map endpoint (working show ID)
+curl "$API_URL/shows/272366af-bbac-4d97-8ead-3d77a1703d9b/seatmap"
 
 # Test seat hold creation
-curl -X POST "https://your-api-gateway-url/prod/holds" \
+curl -X POST "$API_URL/holds" \
   -H "Content-Type: application/json" \
   -H "x-user-id: test-user-123" \
-  -d '{"showId":"550e8400-e29b-41d4-a716-446655440021","seatIds":["A1","A2"],"quantity":2}'
+  -d '{"showId":"272366af-bbac-4d97-8ead-3d77a1703d9b","seatIds":["G5","G6"],"quantity":2}'
+
+# Create order from hold (replace HOLD_ID with actual)
+curl -X POST "$API_URL/orders" \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: test-user-123" \
+  -d '{"holdId":"YOUR_HOLD_ID","customer":{"name":"Test User","email":"test@example.com","phone":"9876543210"}}'
+
+# Confirm payment (replace ORDER_ID with actual)
+curl -X POST "$API_URL/orders/YOUR_ORDER_ID/confirm-payment" \
+  -H "x-user-id: test-user-123"
 ```
 
 ### 2. Test Frontend Features
@@ -309,8 +358,19 @@ npm run dev # Auto-reloads
 
 **Your BookMyShow clone is ready! 🎬🍿**
 
-Example URLs:
-- **Frontend**: `http://localhost:3000`
-- **API**: `https://your-api-gateway-url/prod`
-- **Movies**: `https://your-api-gateway-url/prod/movies`
-- **Seat Map**: `https://your-api-gateway-url/prod/shows/{showId}/seatmap`
+## Production URLs
+| Resource | URL |
+|----------|-----|
+| **Frontend** | `http://localhost:3000` (local dev) |
+| **API Gateway** | `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod` |
+| **Movies** | `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/movies` |
+| **Seat Map** | `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/shows/{showId}/seatmap` |
+| **Holds** | `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/holds` |
+| **Orders** | `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/orders` |
+
+## Sample Show ID for Testing
+```
+272366af-bbac-4d97-8ead-3d77a1703d9b
+```
+
+For complete architecture details, see [COMPLETE_ARCHITECTURE.md](./COMPLETE_ARCHITECTURE.md).

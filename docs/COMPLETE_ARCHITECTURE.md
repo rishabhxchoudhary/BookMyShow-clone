@@ -1,8 +1,17 @@
 # BookMyShow Clone - Complete Architecture Documentation
 
+> **Last Updated**: December 2025
+> **Version**: 2.0 (Production Ready)
+
 ## 🏗️ System Overview
 
 This BookMyShow clone is a modern, scalable movie ticket booking platform built with a **serverless-first architecture** using AWS Lambda, Next.js, PostgreSQL, and Redis. The system is designed to handle millions of concurrent users with atomic seat locking and real-time availability.
+
+### Production Endpoints
+- **API Gateway**: `https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/`
+- **Frontend**: Hosted on Next.js (local development: `http://localhost:3000`)
+- **Database**: PostgreSQL RDS (AWS ap-south-1)
+- **Cache**: Redis Labs (ap-south-1)
 
 ## 📋 Table of Contents
 
@@ -165,92 +174,284 @@ graph TB
 
 ## 🗄️ Database Design
 
+> **Note**: These are the **actual production schemas** as deployed to AWS RDS PostgreSQL.
+
+### Entity Relationship Diagram
+
+```
+┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+│   movies    │       │   shows     │       │  theatres   │
+├─────────────┤       ├─────────────┤       ├─────────────┤
+│ movie_id PK │◄──────│ movie_id FK │       │ theatre_id  │
+│ title       │       │ theatre_id  │──────►│    PK       │
+│ about       │       │ show_id PK  │       │ name        │
+│ rating      │       │ start_time  │       │ address     │
+│ genres[]    │       │ price       │       │ geo_lat/lng │
+└─────────────┘       │ status      │       └─────────────┘
+                      └──────┬──────┘
+                             │
+                             ▼
+                      ┌─────────────┐
+                      │   orders    │
+                      ├─────────────┤
+                      │ order_id PK │
+                      │ show_id FK  │
+                      │ user_id     │
+                      │ seat_ids[]  │
+                      │ amount      │
+                      │ status      │
+                      │ ticket_code │
+                      └─────────────┘
+```
+
 ### Core Tables
 
-#### Movies Table
+#### 1. Movies Table
+**Purpose**: Stores movie catalog with metadata for display and search.
+
 ```sql
 CREATE TABLE movies (
-    movie_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    title VARCHAR(255) NOT NULL,
-    about TEXT,
-    thumbnail_url TEXT,
-    rating NUMERIC(3,1),
-    duration_mins INTEGER,
-    age_rating VARCHAR(10),
-    release_date DATE,
-    language VARCHAR(50),
-    format VARCHAR(20),
-    genres TEXT[],
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    movie_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title         VARCHAR(255) NOT NULL,      -- Movie title for display
+    about         TEXT,                        -- Movie description/synopsis
+    thumbnail_url TEXT,                        -- Poster image URL
+    rating        NUMERIC(3,1),               -- IMDB-style rating (e.g., 8.5)
+    duration_mins INTEGER,                    -- Runtime in minutes
+    age_rating    VARCHAR(10),                -- U, UA, A, etc.
+    release_date  DATE,                       -- Theatrical release date
+    language      VARCHAR(50),                -- Primary language
+    format        VARCHAR(20),                -- 2D, 3D, IMAX, etc.
+    genres        TEXT[],                     -- Array: ['Action', 'Drama']
+    created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Indexes: Primary key on movie_id
+-- Referenced by: shows.movie_id
 ```
 
-#### Theatres Table
+**Usage**:
+- `GET /movies` - List all movies
+- `GET /movies/{movieId}` - Get movie details
+- Frontend movie cards and detail pages
+
+---
+
+#### 2. Theatres Table
+**Purpose**: Stores theatre/cinema hall information for location-based search.
+
 ```sql
 CREATE TABLE theatres (
-    theatre_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL,
-    address TEXT,
-    geo_lat DECIMAL(10, 8),
-    geo_lng DECIMAL(11, 8),
-    cancellation_available BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    theatre_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                  VARCHAR(255) NOT NULL,  -- "PVR Cinemas", "INOX"
+    address               TEXT,                    -- Full address
+    geo_lat               DECIMAL(10, 8),         -- Latitude for mapping
+    geo_lng               DECIMAL(11, 8),         -- Longitude for mapping
+    cancellation_available BOOLEAN DEFAULT TRUE,   -- Refund policy flag
+    created_at            TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Indexes: Primary key on theatre_id
+-- Referenced by: shows.theatre_id
 ```
 
-#### Shows Table
+**Usage**:
+- Display theatre info on show listings
+- Location-based theatre filtering (future)
+- Cancellation policy display
+
+---
+
+#### 3. Shows Table
+**Purpose**: Represents a specific screening of a movie at a theatre at a particular time.
+
 ```sql
 CREATE TABLE shows (
-    show_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    movie_id UUID REFERENCES movies(movie_id),
-    theatre_id UUID REFERENCES theatres(theatre_id),
-    start_time TIMESTAMP WITH TIME ZONE,
-    price DECIMAL(10, 2),
-    status VARCHAR(20) DEFAULT 'active',
+    show_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    movie_id   UUID NOT NULL REFERENCES movies(movie_id),    -- Which movie
+    theatre_id UUID NOT NULL REFERENCES theatres(theatre_id), -- Which theatre
+    start_time TIMESTAMP WITH TIME ZONE NOT NULL,            -- Show timing
+    price      NUMERIC(10,2) NOT NULL,                       -- Ticket price
+    status     VARCHAR(20) DEFAULT 'AVAILABLE',              -- AVAILABLE, FILLING_FAST, ALMOST_FULL, CANCELLED
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes:
+--   PRIMARY KEY on show_id
+--   idx_shows_movie_date: (movie_id, start_time) - for listing shows by movie
+--   idx_shows_theatre: (theatre_id, start_time) - for listing shows by theatre
+
+-- Foreign Keys:
+--   movie_id -> movies(movie_id)
+--   theatre_id -> theatres(theatre_id)
+
+-- Referenced by: orders.show_id
+```
+
+**Usage**:
+- `GET /movies/{movieId}/shows?date=YYYY-MM-DD` - List shows for a movie
+- `GET /shows/{showId}/seatmap` - Get seat availability
+- Links movies to theatres with pricing
+
+---
+
+#### 4. Orders Table
+**Purpose**: Stores ticket bookings with customer info and payment status.
+
+```sql
+CREATE TABLE orders (
+    order_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        VARCHAR(255) NOT NULL,        -- Auth user ID (from session)
+    show_id        UUID NOT NULL REFERENCES shows(show_id),
+    seat_ids       TEXT[] NOT NULL,              -- Array: ['A1', 'A2', 'A3']
+    customer_name  VARCHAR(255),                 -- Booking name
+    customer_email VARCHAR(255),                 -- For confirmation email
+    customer_phone VARCHAR(20),                  -- SMS notifications
+    amount         NUMERIC(10,2) NOT NULL,       -- Total price
+    status         VARCHAR(20) NOT NULL DEFAULT 'PAYMENT_PENDING',
+                   -- PAYMENT_PENDING: Awaiting payment
+                   -- CONFIRMED: Payment successful
+                   -- EXPIRED: Payment window expired
+                   -- CANCELLED: User cancelled
+    ticket_code    VARCHAR(50),                  -- Generated on confirmation: "BMS30F12E2E"
+    created_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    confirmed_at   TIMESTAMP WITH TIME ZONE,    -- When payment was confirmed
+    expires_at     TIMESTAMP WITH TIME ZONE     -- Payment deadline (5 min from creation)
+);
+
+-- Indexes:
+--   PRIMARY KEY on order_id
+--   idx_orders_user: (user_id, created_at DESC) - for user order history
+--   idx_orders_show_status: (show_id, status) - for seat availability queries
+
+-- Foreign Keys:
+--   show_id -> shows(show_id)
+```
+
+**Usage**:
+- `POST /orders` - Create order from hold
+- `GET /orders/{orderId}` - Get order details
+- `POST /orders/{orderId}/confirm-payment` - Confirm payment
+- Seat availability queries (CONFIRMED orders = booked seats)
+
+---
+
+#### 5. Seat Layouts Table (Optional)
+**Purpose**: Stores theatre-specific seat configurations.
+
+```sql
+CREATE TABLE seat_layouts (
+    layout_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    theatre_id  UUID REFERENCES theatres(theatre_id),
+    screen_name VARCHAR(50),                    -- "Screen 1", "IMAX"
+    rows        INTEGER,                        -- Number of rows (A-J = 10)
+    cols        INTEGER,                        -- Seats per row (1-10 = 10)
+    layout_json JSONB,                          -- Custom seat configuration
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 ```
 
-#### Orders Table
-```sql
-CREATE TABLE orders (
-    order_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    show_id UUID REFERENCES shows(show_id),
-    user_id VARCHAR(255),
-    seat_ids TEXT[],
-    total_amount DECIMAL(10, 2),
-    status VARCHAR(20) DEFAULT 'pending',
-    customer_name VARCHAR(255),
-    customer_email VARCHAR(255),
-    customer_phone VARCHAR(20),
-    payment_method VARCHAR(50),
-    payment_id VARCHAR(255),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    confirmed_at TIMESTAMP WITH TIME ZONE
-);
+**Note**: Currently seat layouts are generated dynamically (10 rows × 10 seats).
+
+---
+
+### Order Status Flow
+
+```
+┌─────────────────┐
+│  User selects   │
+│     seats       │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│  Hold created   │ (Redis: 5 min TTL)
+│   in Redis      │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│  Order created  │ status: PAYMENT_PENDING
+│  in PostgreSQL  │ expires_at: now + 5 min
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌───────┐  ┌───────────┐
+│ Pay   │  │  Timeout  │
+└───┬───┘  └─────┬─────┘
+    ▼            ▼
+┌───────────┐  ┌───────────┐
+│ CONFIRMED │  │  EXPIRED  │
+│ticket_code│  │           │
+└───────────┘  └───────────┘
 ```
 
 ### Redis Data Structures
 
-#### Seat Locks
+Redis is used for **real-time seat locking** and **caching**. All seat reservation operations use Redis Lua scripts for atomicity.
+
+#### 1. Seat Locks
+**Purpose**: Prevent double-booking by locking seats during the booking process.
+
 ```
 Key Pattern: seat_lock:{show_id}:{seat_id}
-Value: {user_id}:{hold_id}:{timestamp}
+Example:    seat_lock:272366af-bbac-4d97-8ead-3d77a1703d9b:A1
+
+Value: {user_id}:{hold_id}
+Example: user-123:4d6b2c59-81ad-490e-832b-a19fbcfe3a2e
+
 TTL: 300 seconds (5 minutes)
 ```
 
-#### Hold Metadata
+**Lua Script for Atomic Locking**:
+```lua
+-- Check all seats available, then lock atomically
+for each seat:
+    if seat_lock exists AND owned by different user:
+        return SEAT_TAKEN error
+lock all seats with SET ... EX 300
+```
+
+#### 2. Hold Metadata
+**Purpose**: Store hold details for validation and conversion to orders.
+
 ```
 Key Pattern: hold:{hold_id}
-Value: JSON object with hold details
+Example:    hold:4d6b2c59-81ad-490e-832b-a19fbcfe3a2e
+
+Value (JSON):
+{
+    "hold_id": "4d6b2c59-81ad-490e-832b-a19fbcfe3a2e",
+    "show_id": "272366af-bbac-4d97-8ead-3d77a1703d9b",
+    "user_id": "user-123",
+    "seat_ids": ["A1", "A2"],
+    "quantity": 2,
+    "status": "HELD",
+    "created_at": "2025-12-17T15:07:26.335453+00:00",
+    "expires_at": "2025-12-17T15:12:26.335453+00:00"
+}
+
 TTL: 300 seconds (5 minutes)
 ```
 
-#### Cached Seat Maps
+#### 3. Cached Seat Maps
+**Purpose**: Reduce database load for frequently accessed seat availability.
+
 ```
 Key Pattern: seatmap:{show_id}
+Example:    seatmap:272366af-bbac-4d97-8ead-3d77a1703d9b
+
 Value: JSON object with seat availability
-TTL: 10 seconds (hot data)
+TTL: 10 seconds (short cache for real-time accuracy)
+```
+
+**Cache Invalidation**: Deleted after seat locks change or orders created.
+
+#### 4. Rate Limiting (Optional)
+```
+Key Pattern: ratelimit:{user_id}:{endpoint}
+Example:    ratelimit:user-123:holds
+
+Value: Request count
+TTL: 60 seconds (sliding window)
 ```
 
 ## 🔌 API Architecture
@@ -577,22 +778,161 @@ git push origin feature/seat-locking
 
 ---
 
-## 🎯 Next Steps for New Developers
+## 🎯 Quick Start for New Developers
 
-1. **Setup Local Environment**: Follow the deployment guide
-2. **Understand the Flow**: Trace through seat booking process
-3. **Read the Code**: Start with API client and Lambda handlers
-4. **Run Tests**: Execute unit and integration tests
-5. **Make Changes**: Start with small features or bug fixes
-6. **Deploy**: Test deployment process in staging environment
+### 1. Understanding the Codebase
+
+```
+bms_clone/
+├── bms-lambda/                 # AWS Lambda backend (Python)
+│   ├── src/
+│   │   ├── handlers/          # Lambda function entry points
+│   │   │   ├── movies.py      # GET /movies, GET /movies/{id}
+│   │   │   ├── seats.py       # GET /shows/{id}/seatmap
+│   │   │   ├── holds.py       # POST/GET/DELETE /holds
+│   │   │   └── orders.py      # POST /orders, confirm-payment
+│   │   ├── services/          # Business logic layer
+│   │   │   ├── db_service.py  # PostgreSQL queries
+│   │   │   ├── redis_service.py # Redis operations + Lua scripts
+│   │   │   └── sqs_service.py # Event publishing
+│   │   └── utils/             # Shared utilities
+│   │       ├── config.py      # Environment configuration
+│   │       ├── logger.py      # Structured logging
+│   │       └── validators.py  # Input validation
+│   └── template.yaml          # AWS SAM infrastructure definition
+│
+├── src/                       # Next.js frontend (TypeScript)
+│   ├── app/
+│   │   ├── api/v1/           # Next.js API routes (proxy to Lambda)
+│   │   ├── movies/           # Movie listing and details
+│   │   ├── seat-layout/      # Seat selection page
+│   │   └── order-summary/    # Payment and confirmation
+│   ├── components/
+│   │   ├── ui/               # shadcn/ui components
+│   │   └── SeatSelectorLambda.tsx  # Main seat booking component
+│   └── lib/
+│       ├── api-client.ts     # Lambda API client
+│       ├── types.ts          # TypeScript interfaces
+│       └── schemas.ts        # Zod validation schemas
+│
+└── docs/                      # Documentation
+```
+
+### 2. Key Files to Read First
+
+| File | Purpose |
+|------|---------|
+| `bms-lambda/src/handlers/holds.py` | Understand seat locking flow |
+| `bms-lambda/src/handlers/orders.py` | Understand order creation |
+| `bms-lambda/src/services/redis_service.py` | Atomic seat operations |
+| `bms-lambda/src/services/db_service.py` | Database queries |
+| `src/components/SeatSelectorLambda.tsx` | Frontend booking UI |
+| `src/app/api/v1/orders/[orderId]/route.ts` | API proxy pattern |
+
+### 3. Testing the APIs
+
+```bash
+# Test movies listing
+curl https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/movies
+
+# Test seat map
+curl https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/shows/272366af-bbac-4d97-8ead-3d77a1703d9b/seatmap
+
+# Create a hold (reserve seats)
+curl -X POST https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/holds \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: test-user-123" \
+  -d '{"showId":"272366af-bbac-4d97-8ead-3d77a1703d9b","seatIds":["F5","F6"],"quantity":2}'
+
+# Create order from hold (replace HOLD_ID with actual)
+curl -X POST https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/orders \
+  -H "Content-Type: application/json" \
+  -H "x-user-id: test-user-123" \
+  -d '{"holdId":"HOLD_ID","customer":{"name":"Test","email":"test@example.com","phone":"9876543210"}}'
+
+# Confirm payment (replace ORDER_ID with actual)
+curl -X POST https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/orders/ORDER_ID/confirm-payment \
+  -H "x-user-id: test-user-123"
+```
+
+### 4. Local Development Setup
+
+```bash
+# Frontend
+cd bms_clone
+npm install
+npm run dev          # Starts on http://localhost:3000
+
+# Backend (deploy to AWS)
+cd bms-lambda
+sam build --skip-pull-image
+sam deploy --no-confirm-changeset
+```
+
+### 5. Database Access (Development Only)
+
+```bash
+# Connect to PostgreSQL
+PGPASSWORD='[password]' psql -h bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com \
+  -U postgres -d bms
+
+# Useful queries
+\dt                           # List tables
+SELECT * FROM movies;         # View movies
+SELECT * FROM shows LIMIT 5;  # View shows
+SELECT * FROM orders WHERE status = 'CONFIRMED';  # View confirmed orders
+
+# Redis CLI
+redis-cli -u redis://default:[password]@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+KEYS seat_lock:*             # View seat locks
+KEYS hold:*                  # View holds
+```
+
+### 6. Common Tasks
+
+| Task | Files to Modify |
+|------|-----------------|
+| Add new movie field | `movies.py`, `db_service.py`, `types.ts` |
+| Change seat pricing | `shows` table, `seats.py` |
+| Modify hold duration | `config.py` (HOLD_TTL_SECONDS) |
+| Add new API endpoint | `template.yaml`, new handler file |
+| Update frontend UI | Components in `src/components/` |
+
+### 7. Deployment Checklist
+
+```bash
+# 1. Make code changes
+# 2. Test locally if possible
+
+# 3. Build and deploy Lambda
+cd bms-lambda
+sam build --skip-pull-image
+sam deploy --no-confirm-changeset
+
+# 4. Check CloudWatch logs for errors
+aws logs tail /aws/lambda/bms-orders-service --since 5m
+
+# 5. Test API endpoints
+curl https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod/movies
+```
 
 ## 📞 Support
 
 For questions or issues:
 - **Documentation**: This README and `/docs` folder
 - **Code Comments**: Inline documentation in source code
-- **Issues**: GitHub Issues for bug reports and feature requests
-- **Discussions**: Team Slack/Discord for real-time help
+- **CloudWatch Logs**: `/aws/lambda/bms-*` log groups
+- **Database**: Check `orders` and `shows` tables for data issues
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "Hold not found" | Hold expired (5 min TTL), create new hold |
+| "Seat taken" | Another user locked the seat, try different seats |
+| "Failed to create order" | Check Lambda logs, verify hold exists |
+| "Payment failed" | Order may have expired, check `expires_at` |
+| Database connection error | Check VPC/security group settings |
 
 ---
 
