@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { releaseHold } from "@/lib/memoryStore";
+
+const LAMBDA_HOLDS_URL = process.env.LAMBDA_HOLDS_URL || 'https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod';
 
 export async function POST(
   _request: Request,
@@ -17,18 +18,26 @@ export async function POST(
     }
 
     const { holdId } = await params;
-    const result = releaseHold(holdId, session.user.id);
 
-    if (!result.success) {
-      const status = result.error === "Unauthorized" ? 403 :
-                     result.error === "Hold not found" ? 404 : 409;
+    // Forward request to Lambda holds service
+    const lambdaResponse = await fetch(`${LAMBDA_HOLDS_URL}/holds/${holdId}/release`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': session.user.id,
+      },
+    });
+
+    const data = await lambdaResponse.json();
+
+    if (!lambdaResponse.ok) {
       return NextResponse.json(
-        { error: { message: result.error } },
-        { status }
+        { error: data.error || { message: "Failed to release hold" } },
+        { status: lambdaResponse.status }
       );
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json(data);
   } catch (error) {
     console.error("Error releasing hold:", error);
     return NextResponse.json(

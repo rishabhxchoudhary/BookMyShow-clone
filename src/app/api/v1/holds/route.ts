@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { createHoldSchema } from "@/lib/schemas";
-import { createHold } from "@/lib/memoryStore";
-import type { HoldResponse } from "@/lib/types";
+
+const LAMBDA_HOLDS_URL = process.env.LAMBDA_HOLDS_URL || 'https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod';
 
 export async function POST(request: Request) {
   try {
@@ -43,25 +43,30 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = createHold(showId, session.user.id, seatIds, quantity);
+    // Forward request to Lambda holds service
+    const lambdaResponse = await fetch(`${LAMBDA_HOLDS_URL}/holds`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': session.user.id,
+      },
+      body: JSON.stringify({
+        showId,
+        seatIds,
+        quantity,
+      }),
+    });
 
-    if (result.error) {
+    const data = await lambdaResponse.json();
+
+    if (!lambdaResponse.ok) {
       return NextResponse.json(
-        { error: { message: result.error } },
-        { status: 409 }
+        { error: data.error || { message: "Failed to create hold" } },
+        { status: lambdaResponse.status }
       );
     }
 
-    const hold = result.hold!;
-    const response: HoldResponse = {
-      holdId: hold.holdId,
-      showId: hold.showId,
-      seatIds: hold.seatIds,
-      status: hold.status,
-      expiresAt: hold.expiresAt,
-    };
-
-    return NextResponse.json(response, { status: 201 });
+    return NextResponse.json(data, { status: 201 });
   } catch (error) {
     console.error("Error creating hold:", error);
     return NextResponse.json(

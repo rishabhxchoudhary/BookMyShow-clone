@@ -1,59 +1,37 @@
 import json
-import uuid
 from typing import Dict, Any, List
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from services.db_service import db_service
 from services.redis_service import redis_service
-from services.sqs_service import sqs_service
 from utils.logger import BMSLogger
-from utils.validators import BMSValidator, ValidationError
-from utils.config import config
+from utils.validators import BMSValidator
 
 logger = BMSLogger(__name__)
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Seats service Lambda handler"""
+    """Seats/Seatmap service Lambda handler"""
     try:
         # Extract HTTP method and path
         http_method = event.get('httpMethod', '')
         path = event.get('path', '')
         path_parameters = event.get('pathParameters') or {}
-        query_parameters = event.get('queryStringParameters') or {}
-        body = event.get('body', '')
         
-        logger.info(f"Seats service request", extra={
+        logger.info(f"Seatmap service request", extra={
             'method': http_method,
             'path': path,
-            'path_params': path_parameters,
-            'query_params': query_parameters
+            'path_params': path_parameters
         })
         
-        # Extract user info from authorization (in production, decode JWT)
-        # For now, we'll extract from headers or use a test user
-        headers = event.get('headers', {})
-        user_id = headers.get('x-user-id', 'test-user-123')  # In production: decode JWT
-        
-        # Route the request
+        # Route the request - only seatmap endpoint
         if path.startswith('/shows/') and path.endswith('/seatmap') and http_method == 'GET':
             show_id = path_parameters.get('showId')
             return get_seatmap(show_id)
-        elif path == '/holds' and http_method == 'POST':
-            return create_hold(body, user_id)
-        elif path.startswith('/holds/') and not path.endswith('/') and http_method == 'GET':
-            hold_id = path_parameters.get('holdId')
-            return get_hold(hold_id, user_id)
-        elif path.startswith('/holds/') and not path.endswith('/') and http_method == 'PUT':
-            hold_id = path_parameters.get('holdId')
-            return update_hold(hold_id, body, user_id)
-        elif path.startswith('/holds/') and not path.endswith('/') and http_method == 'DELETE':
-            hold_id = path_parameters.get('holdId')
-            return release_hold(hold_id, user_id)
         else:
             return create_error_response(404, "Not Found")
             
     except Exception as e:
-        logger.error("Unhandled error in seats service", error=e)
+        logger.error("Unhandled error in seatmap service", error=e)
         return create_error_response(500, "Internal Server Error")
 
 def get_seatmap(show_id: str) -> Dict[str, Any]:
@@ -63,33 +41,45 @@ def get_seatmap(show_id: str) -> Dict[str, Any]:
         if not BMSValidator.validate_uuid(show_id):
             return create_error_response(400, "Invalid show ID format")
         
+        # Check cache first
+        cached_data = redis_service.get_cached_seat_availability(show_id)
+        if cached_data:
+            logger.info("Returning cached seatmap", extra={'show_id': show_id})
+            return create_success_response(cached_data)
+        
         # Get show details from database
         show = db_service.get_show_by_id(show_id)
         if not show:
             return create_error_response(404, "Show not found")
         
-        # Mock seat layout (in production, this would come from database)
-        seat_layout = generate_mock_seat_layout()
+        # Get seat layout from database or generate mock layout
+        seat_layout = get_seat_layout_for_theatre(show.get('theatre_id'))
         
-        # Get confirmed seats from database (none for now as we don't have order data)
-        confirmed_seats = []
+        # Get confirmed seats from database (permanently booked)
+        confirmed_seats = db_service.get_confirmed_seats_for_show(show_id)
         
-        # Get locked seats from Redis (none initially)
-        locked_seats = []
+        # Get locked seats from Redis (temporary holds)
+        locked_seats = redis_service.get_locked_seats_for_show(show_id)
         
-        # Combine unavailable seats
-        unavailable_seats = list(set(confirmed_seats + locked_seats))
+        # Get permanently unavailable seats (broken, etc.)
+        permanently_unavailable = get_permanently_unavailable_seats(show_id)
+        
+        # Combine all unavailable seats
+        unavailable_seats = list(set(confirmed_seats + permanently_unavailable))
         
         seatmap_data = {
             "showId": show_id,
-            "movieTitle": show.get('title', ''),
-            "theatreName": show.get('name', ''),
+            "movieTitle": show.get('movie_title', ''),
+            "theatreName": show.get('theatre_name', ''),
             "startTime": show['start_time'].isoformat() if show.get('start_time') else None,
             "price": float(show['price']) if show.get('price') else 0,
             "layout": seat_layout,
             "unavailableSeatIds": unavailable_seats,
-            "heldSeatIds": locked_seats  # Specifically locked seats
+            "heldSeatIds": locked_seats  # Temporarily held by users
         }
+        
+        # Cache the result for 10 seconds to reduce load
+        redis_service.cache_seat_availability(show_id, seatmap_data, ttl=10)
         
         return create_success_response(seatmap_data)
         
@@ -97,129 +87,84 @@ def get_seatmap(show_id: str) -> Dict[str, Any]:
         logger.error("Failed to get seatmap", error=e, extra={'show_id': show_id})
         return create_error_response(500, "Failed to fetch seat map")
 
-def create_hold(body: str, user_id: str) -> Dict[str, Any]:
-    """Create a new seat hold"""
-    try:
-        # Parse request body
-        if not body:
-            return create_error_response(400, "Request body is required")
-        
-        try:
-            request_data = json.loads(body)
-        except json.JSONDecodeError:
-            return create_error_response(400, "Invalid JSON in request body")
-        
-        # Validate request
-        try:
-            BMSValidator.validate_hold_request(request_data)
-        except ValidationError as e:
-            return create_error_response(400, str(e))
-        
-        show_id = request_data['showId']
-        seat_ids = request_data['seatIds']
-        quantity = request_data['quantity']
-        
-        # Check if show exists
-        show = db_service.get_show_by_id(show_id)
-        if not show:
-            return create_error_response(404, "Show not found")
-        
-        # Generate hold ID
-        hold_id = str(uuid.uuid4())
-        
-        # For now, mock successful hold creation (Redis integration can be added later)
-        now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(seconds=config.HOLD_TTL_SECONDS)
-        
-        response_data = {
-            "holdId": hold_id,
-            "showId": show_id,
-            "seatIds": seat_ids,
-            "status": "HELD",
-            "expiresAt": expires_at.isoformat()
+def get_seat_layout_for_theatre(theatre_id: str) -> Dict[str, Any]:
+    """Get seat layout for a theatre (mock implementation)"""
+    # In production, this would come from a theatre configuration table
+    return {
+        "rows": [
+            {
+                "rowId": "A",
+                "seats": [
+                    {"seatId": "A1", "type": "regular"},
+                    {"seatId": "A2", "type": "regular"},
+                    {"seatId": "A3", "type": "regular"},
+                    {"seatId": "A4", "type": "regular"},
+                    {"seatId": "A5", "type": "regular"},
+                    {"seatId": "A6", "type": "regular"},
+                    {"seatId": "A7", "type": "regular"},
+                    {"seatId": "A8", "type": "regular"},
+                    {"seatId": "A9", "type": "regular"},
+                    {"seatId": "A10", "type": "regular"}
+                ]
+            },
+            {
+                "rowId": "B",
+                "seats": [
+                    {"seatId": "B1", "type": "regular"},
+                    {"seatId": "B2", "type": "regular"},
+                    {"seatId": "B3", "type": "regular"},
+                    {"seatId": "B4", "type": "regular"},
+                    {"seatId": "B5", "type": "regular"},
+                    {"seatId": "B6", "type": "regular"},
+                    {"seatId": "B7", "type": "regular"},
+                    {"seatId": "B8", "type": "regular"},
+                    {"seatId": "B9", "type": "regular"},
+                    {"seatId": "B10", "type": "regular"}
+                ]
+            },
+            {
+                "rowId": "C",
+                "seats": [
+                    {"seatId": "C1", "type": "premium"},
+                    {"seatId": "C2", "type": "premium"},
+                    {"seatId": "C3", "type": "premium"},
+                    {"seatId": "C4", "type": "premium"},
+                    {"seatId": "C5", "type": "premium"},
+                    {"seatId": "C6", "type": "premium"},
+                    {"seatId": "C7", "type": "premium"},
+                    {"seatId": "C8", "type": "premium"},
+                    {"seatId": "C9", "type": "premium"},
+                    {"seatId": "C10", "type": "premium"}
+                ]
+            },
+            {
+                "rowId": "D",
+                "seats": [
+                    {"seatId": "D1", "type": "premium"},
+                    {"seatId": "D2", "type": "premium"},
+                    {"seatId": "D3", "type": "premium"},
+                    {"seatId": "D4", "type": "premium"},
+                    {"seatId": "D5", "type": "premium"},
+                    {"seatId": "D6", "type": "premium"},
+                    {"seatId": "D7", "type": "premium"},
+                    {"seatId": "D8", "type": "premium"},
+                    {"seatId": "D9", "type": "premium"},
+                    {"seatId": "D10", "type": "premium"}
+                ]
+            }
+        ],
+        "totalSeats": 40,
+        "priceMap": {
+            "regular": 150.0,
+            "premium": 250.0
         }
-        
-        logger.info("Hold created successfully", extra={
-            'hold_id': hold_id,
-            'show_id': show_id,
-            'user_id': user_id,
-            'seat_ids': seat_ids
-        })
-        
-        return create_success_response(response_data)
-        
-    except Exception as e:
-        logger.error("Failed to create hold", error=e, extra={
-            'user_id': user_id,
-            'request_body': body
-        })
-        return create_error_response(500, "Failed to create hold")
+    }
 
-def get_hold(hold_id: str, user_id: str) -> Dict[str, Any]:
-    """Get hold details"""
-    try:
-        # Validate hold ID
-        if not BMSValidator.validate_uuid(hold_id):
-            return create_error_response(400, "Invalid hold ID format")
-        
-        # Mock hold data for testing
-        response_data = {
-            "holdId": hold_id,
-            "showId": "550e8400-e29b-41d4-a716-446655440021",
-            "seatIds": ["A1", "A2"],
-            "status": "HELD",
-            "expiresAt": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
-            "createdAt": datetime.now(timezone.utc).isoformat()
-        }
-        
-        return create_success_response(response_data)
-        
-    except Exception as e:
-        logger.error("Failed to get hold", error=e, extra={
-            'hold_id': hold_id,
-            'user_id': user_id
-        })
-        return create_error_response(500, "Failed to get hold")
-
-def update_hold(hold_id: str, body: str, user_id: str) -> Dict[str, Any]:
-    """Update hold with new seats"""
-    return create_error_response(501, "Update hold not yet implemented")
-
-def release_hold(hold_id: str, user_id: str) -> Dict[str, Any]:
-    """Release a hold and free up seats"""
-    try:
-        # Validate hold ID
-        if not BMSValidator.validate_uuid(hold_id):
-            return create_error_response(400, "Invalid hold ID format")
-        
-        logger.info("Hold released successfully", extra={
-            'hold_id': hold_id,
-            'user_id': user_id
-        })
-        
-        return create_success_response({
-            "message": "Hold released successfully"
-        })
-        
-    except Exception as e:
-        logger.error("Failed to release hold", error=e, extra={
-            'hold_id': hold_id,
-            'user_id': user_id
-        })
-        return create_error_response(500, "Failed to release hold")
-
-def generate_mock_seat_layout() -> List[Dict[str, Any]]:
-    """Generate mock seat layout (in production, this would come from database)"""
-    layout = []
-    for row in ['A', 'B', 'C', 'D', 'E']:
-        for seat_num in range(1, 9):  # 8 seats per row
-            layout.append({
-                "seatId": f"{row}{seat_num}",
-                "row": row,
-                "number": seat_num,
-                "type": "regular"  # could be "premium", "disabled", etc.
-            })
-    return layout
+def get_permanently_unavailable_seats(show_id: str) -> List[str]:
+    """Get permanently unavailable seats (broken, maintenance, etc.)"""
+    # In production, this would come from database based on theatre/show
+    # For now, return some static broken seats
+    return ["A5", "B10", "C15"]  # Example broken seats
 
 def create_success_response(data: Any) -> Dict[str, Any]:
     """Create successful API response"""
@@ -249,3 +194,6 @@ def create_error_response(status_code: int, message: str) -> Dict[str, Any]:
             }
         })
     }
+    """Update hold with new seats"""
+    return create_error_response(501, "Update hold not yet implemented")
+

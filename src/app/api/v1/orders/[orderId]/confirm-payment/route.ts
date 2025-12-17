@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { confirmOrderPayment, getOrder } from "@/lib/memoryStore";
-import { getShowById, getMovieById, getTheatreById } from "@/lib/mockData";
-import type { OrderResponse } from "@/lib/types";
+
+const LAMBDA_ORDERS_URL = process.env.LAMBDA_ORDERS_URL || 'https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod';
 
 export async function POST(
   _request: Request,
@@ -19,46 +18,26 @@ export async function POST(
     }
 
     const { orderId } = await params;
-    const result = confirmOrderPayment(orderId, session.user.id);
 
-    if (result.error) {
-      const status = result.error === "Unauthorized" ? 403 :
-                     result.error === "Order not found" ? 404 : 409;
+    // Forward request to Lambda orders service
+    const lambdaResponse = await fetch(`${LAMBDA_ORDERS_URL}/orders/${orderId}/confirm-payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': session.user.id,
+      },
+    });
+
+    const data = await lambdaResponse.json();
+
+    if (!lambdaResponse.ok) {
       return NextResponse.json(
-        { error: { message: result.error } },
-        { status }
+        { error: data.error || { message: "Failed to confirm payment" } },
+        { status: lambdaResponse.status }
       );
     }
 
-    const order = result.order!;
-
-    // Try to get show/movie/theatre from mock data, use defaults if from Lambda
-    const show = getShowById(order.showId);
-    const movie = show ? getMovieById(show.movieId) : undefined;
-    const theatre = show ? getTheatreById(show.theatreId) : undefined;
-
-    const response: OrderResponse = {
-      orderId: order.orderId,
-      status: order.status,
-      movie: {
-        movieId: movie?.movieId ?? order.movieId,
-        title: movie?.title ?? "Movie",
-      },
-      theatre: {
-        theatreId: theatre?.theatreId ?? order.theatreId,
-        name: theatre?.name ?? "Theatre",
-      },
-      show: {
-        showId: show?.showId ?? order.showId,
-        startTime: show?.startTime ?? new Date().toISOString(),
-      },
-      seats: order.seatIds,
-      amount: order.amount,
-      expiresAt: order.expiresAt,
-      ticketCode: order.ticketCode,
-    };
-
-    return NextResponse.json(response);
+    return NextResponse.json(data);
   } catch (error) {
     console.error("Error confirming payment:", error);
     return NextResponse.json(

@@ -157,6 +157,29 @@ Resources:
             RestApiId: !Ref BMSApi
             Path: /shows/{showId}/seatmap
             Method: GET
+  # Holds Service - Handle seat holds separately for better scalability
+  HoldsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bms-holds-service
+      CodeUri: src/
+      Handler: handlers.holds.lambda_handler
+      Environment:
+        Variables:
+          REDIS_URL: redis://default:bY6nYQasYLWeBJvSUjs6VmfYxYHROp1u@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+          DATABASE_URL: postgresql://postgres:2kTqQ7Mcl054kELxa955@bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com:5432/bms
+          SQS_QUEUE_URL: https://sqs.ap-south-1.amazonaws.com/905418273616/bms-events-queue
+          LOG_LEVEL: INFO
+          HOLD_TTL_SECONDS: 600
+      Policies:
+        - VPCAccessPolicy: {}
+        - Statement:
+          - Effect: Allow
+            Action:
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusters
+            Resource: "*"
+      Events:
         CreateHold:
           Type: Api
           Properties:
@@ -169,18 +192,12 @@ Resources:
             RestApiId: !Ref BMSApi
             Path: /holds/{holdId}
             Method: GET
-        UpdateHold:
-          Type: Api
-          Properties:
-            RestApiId: !Ref BMSApi
-            Path: /holds/{holdId}
-            Method: PUT
         ReleaseHold:
           Type: Api
           Properties:
             RestApiId: !Ref BMSApi
-            Path: /holds/{holdId}
-            Method: DELETE
+            Path: /holds/{holdId}/release
+            Method: POST
 
   # Orders Service - Handle order creation and payment
   OrdersFunction:

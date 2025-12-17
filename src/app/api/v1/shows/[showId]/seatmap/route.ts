@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { getHeldSeatIdsForShow, getConfirmedSeatIdsForShow } from "@/lib/memoryStore";
-import { bmsAPI, type SeatmapResponse } from "@/lib/api-client";
+
+const LAMBDA_SEATS_URL = process.env.LAMBDA_SEATS_URL || 'https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod';
 
 export async function GET(
   _request: Request,
@@ -9,36 +9,25 @@ export async function GET(
   try {
     const { showId } = await params;
 
-    // Fetch base seatmap from Lambda API
-    const lambdaSeatmap = await bmsAPI.getSeatmap(showId) as SeatmapResponse;
+    // Forward request directly to Lambda seats service
+    // The Lambda service now handles all seat state (Redis-based holds and database-based confirmed seats)
+    const lambdaResponse = await fetch(`${LAMBDA_SEATS_URL}/shows/${showId}/seatmap`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
 
-    // Get locally held and confirmed seats
-    const localHeldSeats = getHeldSeatIdsForShow(showId);
-    const localConfirmedSeats = getConfirmedSeatIdsForShow(showId);
+    const data = await lambdaResponse.json();
 
-    // Merge Lambda unavailable seats with local holds/confirmed seats
-    const allUnavailable = [
-      ...new Set([
-        ...lambdaSeatmap.unavailableSeatIds,
-        ...localConfirmedSeats,
-      ])
-    ];
+    if (!lambdaResponse.ok) {
+      return NextResponse.json(
+        { error: data.error || { message: "Failed to get seatmap" } },
+        { status: lambdaResponse.status }
+      );
+    }
 
-    const allHeld = [
-      ...new Set([
-        ...lambdaSeatmap.heldSeatIds,
-        ...localHeldSeats,
-      ])
-    ];
-
-    // Return combined seatmap
-    const response = {
-      ...lambdaSeatmap,
-      unavailableSeatIds: allUnavailable,
-      heldSeatIds: allHeld,
-    };
-
-    return NextResponse.json(response);
+    return NextResponse.json(data);
   } catch (error) {
     console.error("Error fetching seatmap:", error);
     return NextResponse.json(

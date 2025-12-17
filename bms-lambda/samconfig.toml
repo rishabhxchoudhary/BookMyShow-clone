@@ -11,13 +11,13 @@ confirm_changeset = false
 capabilities = "CAPABILITY_IAM"
 disable_rollback = false
 parameter_overrides = [
-  "DatabaseHost=localhost",
+  "DatabaseHost=bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com",
   "DatabasePort=5432", 
-  "DatabaseName=bms_production",
-  "DatabaseUser=bms_user",
-  "DatabasePassword=temp-password",
-  "RedisHost=localhost",
-  "RedisPort=6379"
+  "DatabaseName=bms",
+  "DatabaseUser=postgres",
+  "DatabasePassword=2kTqQ7Mcl054kELxa955",
+  "RedisHost=redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com",
+  "RedisPort=15866"
 ]
 
 [default.build.parameters]

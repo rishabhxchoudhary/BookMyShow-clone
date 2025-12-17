@@ -58,6 +58,14 @@ class SQSService:
         """Send order confirmed event"""
         return self.send_event('order.confirmed', order_data)
     
+    def send_hold_created_event(self, hold_data: Dict[str, Any]) -> bool:
+        """Send hold created event"""
+        return self.send_event('hold.created', hold_data)
+    
+    def send_hold_released_event(self, hold_data: Dict[str, Any]) -> bool:
+        """Send hold released event"""
+        return self.send_event('hold.released', hold_data)
+    
     def send_hold_expired_event(self, hold_data: Dict[str, Any]) -> bool:
         """Send hold expired event"""
         return self.send_event('hold.expired', hold_data)

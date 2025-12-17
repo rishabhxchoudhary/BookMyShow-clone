@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { createOrderSchema } from "@/lib/schemas";
-import { createOrder, getHold } from "@/lib/memoryStore";
-import { getShowById, getMovieById, getTheatreById } from "@/lib/mockData";
-import type { OrderResponse } from "@/lib/types";
+
+const LAMBDA_ORDERS_URL = process.env.LAMBDA_ORDERS_URL || 'https://q2f547iwef.execute-api.ap-south-1.amazonaws.com/prod';
 
 export async function POST(request: Request) {
   try {
@@ -33,46 +32,29 @@ export async function POST(request: Request) {
 
     const { holdId, customer } = parseResult.data;
 
-    const result = createOrder(holdId, session.user.id, customer);
+    // Forward request to Lambda orders service
+    const lambdaResponse = await fetch(`${LAMBDA_ORDERS_URL}/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': session.user.id,
+      },
+      body: JSON.stringify({
+        holdId,
+        customer,
+      }),
+    });
 
-    if (result.error) {
-      const status = result.error === "Unauthorized" ? 403 :
-                     result.error === "Hold not found" ? 404 : 409;
+    const data = await lambdaResponse.json();
+
+    if (!lambdaResponse.ok) {
       return NextResponse.json(
-        { error: { message: result.error } },
-        { status }
+        { error: data.error || { message: "Failed to create order" } },
+        { status: lambdaResponse.status }
       );
     }
 
-    const order = result.order!;
-    const hold = getHold(order.holdId)!;
-
-    // Try to get show/movie/theatre from mock data, use defaults if from Lambda
-    const show = getShowById(hold.showId);
-    const movie = show ? getMovieById(show.movieId) : undefined;
-    const theatre = show ? getTheatreById(show.theatreId) : undefined;
-
-    const response: OrderResponse = {
-      orderId: order.orderId,
-      status: order.status,
-      movie: {
-        movieId: movie?.movieId ?? order.movieId,
-        title: movie?.title ?? "Movie",
-      },
-      theatre: {
-        theatreId: theatre?.theatreId ?? order.theatreId,
-        name: theatre?.name ?? "Theatre",
-      },
-      show: {
-        showId: show?.showId ?? hold.showId,
-        startTime: show?.startTime ?? new Date().toISOString(),
-      },
-      seats: order.seatIds,
-      amount: order.amount,
-      expiresAt: order.expiresAt,
-    };
-
-    return NextResponse.json(response, { status: 201 });
+    return NextResponse.json(data, { status: 201 });
   } catch (error) {
     console.error("Error creating order:", error);
     return NextResponse.json(
