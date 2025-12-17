@@ -1,4 +1,4 @@
-import type { Hold, Order, HoldStatus, OrderStatus } from "./types";
+import type { Hold, Order } from "./types";
 import { getShowById, getMovieById, permanentlyUnavailableSeats } from "./mockData";
 
 // ==================== In-Memory Storage ====================
@@ -6,10 +6,70 @@ import { getShowById, getMovieById, permanentlyUnavailableSeats } from "./mockDa
 const holds = new Map<string, Hold>();
 const orders = new Map<string, Order>();
 
-// Hold expiration time in milliseconds (5 minutes)
-const HOLD_TTL_MS = 5 * 60 * 1000;
-// Order expiration time in milliseconds (5 minutes)
+// Hold expiration time in milliseconds (10 minutes as per requirement)
+const HOLD_TTL_MS = 10 * 60 * 1000;
+// Order payment expiration time in milliseconds (5 minutes)
 const ORDER_TTL_MS = 5 * 60 * 1000;
+
+// ==================== Booking Queue System ====================
+// Partitioned queues by showId and seat tier (A-E = tier1, F-Z = tier2)
+
+interface QueuedBooking {
+  id: string;
+  showId: string;
+  userId: string;
+  seatIds: string[];
+  quantity: number;
+  tier: "tier1" | "tier2";
+  timestamp: number;
+  resolve: (result: { hold?: Hold; error?: string }) => void;
+}
+
+// Queues partitioned by showId and tier
+const bookingQueues = new Map<string, QueuedBooking[]>();
+const processingLocks = new Map<string, boolean>();
+
+function getQueueKey(showId: string, tier: "tier1" | "tier2"): string {
+  return `${showId}:${tier}`;
+}
+
+function getSeatTier(seatId: string): "tier1" | "tier2" {
+  const row = seatId.charAt(0).toUpperCase();
+  // A-E = tier1 (premium/front), F-Z = tier2 (regular/back)
+  return row <= "E" ? "tier1" : "tier2";
+}
+
+function getPrimaryTier(seatIds: string[]): "tier1" | "tier2" {
+  // Determine queue based on majority of seats
+  const tier1Count = seatIds.filter(s => getSeatTier(s) === "tier1").length;
+  return tier1Count >= seatIds.length / 2 ? "tier1" : "tier2";
+}
+
+async function processQueue(queueKey: string): Promise<void> {
+  if (processingLocks.get(queueKey)) return;
+  processingLocks.set(queueKey, true);
+
+  const queue = bookingQueues.get(queueKey) || [];
+
+  while (queue.length > 0) {
+    const booking = queue.shift()!;
+
+    // Process booking with optimistic locking
+    const result = processBookingWithLock(
+      booking.showId,
+      booking.userId,
+      booking.seatIds,
+      booking.quantity
+    );
+
+    booking.resolve(result);
+
+    // Small delay to prevent CPU hogging
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  processingLocks.set(queueKey, false);
+}
 
 // ==================== UUID Generator ====================
 
@@ -21,27 +81,41 @@ function generateUUID(): string {
   });
 }
 
-// ==================== Hold Functions ====================
+// ==================== Expiration Check (NO DB WRITES) ====================
 
 function isHoldExpired(hold: Hold): boolean {
   return new Date(hold.expiresAt) < new Date();
 }
 
-function updateHoldStatusIfExpired(hold: Hold): Hold {
-  if (hold.status === "HELD" && isHoldExpired(hold)) {
-    hold.status = "EXPIRED";
-    holds.set(hold.holdId, hold);
-  }
-  return hold;
+function isOrderExpired(order: Order): boolean {
+  return order.status === "PAYMENT_PENDING" && new Date(order.expiresAt) < new Date();
 }
+
+// Returns effective status without modifying storage
+function getEffectiveHoldStatus(hold: Hold): Hold["status"] {
+  if (hold.status === "HELD" && isHoldExpired(hold)) {
+    return "EXPIRED";
+  }
+  return hold.status;
+}
+
+function getEffectiveOrderStatus(order: Order): Order["status"] {
+  if (order.status === "PAYMENT_PENDING" && isOrderExpired(order)) {
+    return "EXPIRED";
+  }
+  return order.status;
+}
+
+// ==================== Hold Functions ====================
 
 export function getActiveHoldsForShow(showId: string): Hold[] {
   const result: Hold[] = [];
   for (const hold of holds.values()) {
     if (hold.showId === showId) {
-      const updated = updateHoldStatusIfExpired(hold);
-      if (updated.status === "HELD") {
-        result.push(updated);
+      // Check expiration WITHOUT updating storage
+      const effectiveStatus = getEffectiveHoldStatus(hold);
+      if (effectiveStatus === "HELD") {
+        result.push(hold);
       }
     }
   }
@@ -74,36 +148,113 @@ export function getUnavailableSeatIdsForShow(showId: string): string[] {
   return [...new Set([...permanentlyUnavailableSeats, ...heldSeats, ...confirmedSeats])];
 }
 
-export function createHold(
+// ==================== Optimistic Locking for Seat Booking ====================
+
+interface SeatVersion {
+  version: number;
+  lockedBy: string | null;
+  lockedAt: number | null;
+}
+
+const seatVersions = new Map<string, SeatVersion>(); // key: `${showId}:${seatId}`
+
+function getSeatVersionKey(showId: string, seatId: string): string {
+  return `${showId}:${seatId}`;
+}
+
+function getSeatVersion(showId: string, seatId: string): SeatVersion {
+  const key = getSeatVersionKey(showId, seatId);
+  if (!seatVersions.has(key)) {
+    seatVersions.set(key, { version: 0, lockedBy: null, lockedAt: null });
+  }
+  return seatVersions.get(key)!;
+}
+
+function tryAcquireSeatLock(
+  showId: string,
+  seatId: string,
+  userId: string,
+  expectedVersion: number
+): { success: boolean; currentVersion: number } {
+  const key = getSeatVersionKey(showId, seatId);
+  const current = getSeatVersion(showId, seatId);
+
+  // Check if seat is already locked by someone else (and not expired)
+  if (current.lockedBy && current.lockedBy !== userId && current.lockedAt) {
+    const lockAge = Date.now() - current.lockedAt;
+    if (lockAge < HOLD_TTL_MS) {
+      return { success: false, currentVersion: current.version };
+    }
+  }
+
+  // Optimistic locking: check version hasn't changed
+  if (current.version !== expectedVersion) {
+    return { success: false, currentVersion: current.version };
+  }
+
+  // Acquire lock
+  seatVersions.set(key, {
+    version: current.version + 1,
+    lockedBy: userId,
+    lockedAt: Date.now(),
+  });
+
+  return { success: true, currentVersion: current.version + 1 };
+}
+
+function releaseSeatLock(showId: string, seatId: string, userId: string): void {
+  const key = getSeatVersionKey(showId, seatId);
+  const current = getSeatVersion(showId, seatId);
+
+  if (current.lockedBy === userId) {
+    seatVersions.set(key, {
+      version: current.version + 1,
+      lockedBy: null,
+      lockedAt: null,
+    });
+  }
+}
+
+// ==================== Core Booking Logic with Optimistic Locking ====================
+
+function processBookingWithLock(
   showId: string,
   userId: string,
   seatIds: string[],
   quantity: number
 ): { hold?: Hold; error?: string } {
-  // Check if show exists
-  const show = getShowById(showId);
-  if (!show) {
-    return { error: "Show not found" };
-  }
+  // Step 1: Get current versions for all seats
+  const seatVersionsSnapshot = seatIds.map(seatId => ({
+    seatId,
+    version: getSeatVersion(showId, seatId).version,
+  }));
 
-  // Check for seat conflicts
+  // Step 2: Check for conflicts with held/confirmed seats
   const heldSeats = getHeldSeatIdsForShow(showId, userId);
   const confirmedSeats = getConfirmedSeatIdsForShow(showId);
   const unavailableSeats = [...permanentlyUnavailableSeats, ...heldSeats, ...confirmedSeats];
 
-  const conflicts = seatIds.filter((seat) => unavailableSeats.includes(seat));
+  const conflicts = seatIds.filter(seat => unavailableSeats.includes(seat));
   if (conflicts.length > 0) {
     return { error: `Seats already taken: ${conflicts.join(", ")}` };
   }
 
-  // Release any existing hold by this user for this show
-  for (const hold of holds.values()) {
-    if (hold.showId === showId && hold.userId === userId && hold.status === "HELD") {
-      hold.status = "RELEASED";
-      holds.set(hold.holdId, hold);
+  // Step 3: Try to acquire locks on all seats (optimistic locking)
+  const acquiredLocks: string[] = [];
+
+  for (const { seatId, version } of seatVersionsSnapshot) {
+    const result = tryAcquireSeatLock(showId, seatId, userId, version);
+    if (!result.success) {
+      // Rollback acquired locks
+      for (const lockedSeat of acquiredLocks) {
+        releaseSeatLock(showId, lockedSeat, userId);
+      }
+      return { error: `Seat ${seatId} was just taken. Please try again.` };
     }
+    acquiredLocks.push(seatId);
   }
 
+  // Step 4: Create new hold (allows multiple holds per user for different tabs/sessions)
   const now = new Date();
   const expiresAt = new Date(now.getTime() + HOLD_TTL_MS);
 
@@ -122,10 +273,62 @@ export function createHold(
   return { hold };
 }
 
+// ==================== Public API: Queue-based Hold Creation ====================
+
+export function createHold(
+  showId: string,
+  userId: string,
+  seatIds: string[],
+  quantity: number
+): { hold?: Hold; error?: string } {
+  // For synchronous API compatibility, process directly with locking
+  return processBookingWithLock(showId, userId, seatIds, quantity);
+}
+
+// Async version that uses queue (for high-concurrency scenarios)
+export async function createHoldAsync(
+  showId: string,
+  userId: string,
+  seatIds: string[],
+  quantity: number
+): Promise<{ hold?: Hold; error?: string }> {
+  const tier = getPrimaryTier(seatIds);
+  const queueKey = getQueueKey(showId, tier);
+
+  return new Promise((resolve) => {
+    const booking: QueuedBooking = {
+      id: generateUUID(),
+      showId,
+      userId,
+      seatIds,
+      quantity,
+      tier,
+      timestamp: Date.now(),
+      resolve,
+    };
+
+    // Add to queue
+    if (!bookingQueues.has(queueKey)) {
+      bookingQueues.set(queueKey, []);
+    }
+    bookingQueues.get(queueKey)!.push(booking);
+
+    // Start processing queue
+    processQueue(queueKey);
+  });
+}
+
+// ==================== Hold Retrieval ====================
+
 export function getHold(holdId: string): Hold | undefined {
   const hold = holds.get(holdId);
   if (!hold) return undefined;
-  return updateHoldStatusIfExpired(hold);
+
+  // Return with effective status (no storage update)
+  return {
+    ...hold,
+    status: getEffectiveHoldStatus(hold),
+  };
 }
 
 export function updateHold(
@@ -134,7 +337,7 @@ export function updateHold(
   seatIds: string[],
   quantity: number
 ): { hold?: Hold; error?: string } {
-  const hold = getHold(holdId);
+  const hold = holds.get(holdId);
   if (!hold) {
     return { error: "Hold not found" };
   }
@@ -143,8 +346,9 @@ export function updateHold(
     return { error: "Unauthorized" };
   }
 
-  if (hold.status !== "HELD") {
-    return { error: `Cannot update hold with status: ${hold.status}` };
+  const effectiveStatus = getEffectiveHoldStatus(hold);
+  if (effectiveStatus !== "HELD") {
+    return { error: `Cannot update hold with status: ${effectiveStatus}` };
   }
 
   // Check for seat conflicts (excluding current hold's seats)
@@ -155,6 +359,17 @@ export function updateHold(
   const conflicts = seatIds.filter((seat) => unavailableSeats.includes(seat));
   if (conflicts.length > 0) {
     return { error: `Seats already taken: ${conflicts.join(", ")}` };
+  }
+
+  // Release old seat locks
+  for (const seatId of hold.seatIds) {
+    releaseSeatLock(hold.showId, seatId, userId);
+  }
+
+  // Acquire new seat locks
+  for (const seatId of seatIds) {
+    const version = getSeatVersion(hold.showId, seatId).version;
+    tryAcquireSeatLock(hold.showId, seatId, userId, version);
   }
 
   // Update hold
@@ -171,7 +386,7 @@ export function releaseHold(
   holdId: string,
   userId: string
 ): { success: boolean; error?: string } {
-  const hold = getHold(holdId);
+  const hold = holds.get(holdId);
   if (!hold) {
     return { success: false, error: "Hold not found" };
   }
@@ -180,8 +395,14 @@ export function releaseHold(
     return { success: false, error: "Unauthorized" };
   }
 
-  if (hold.status !== "HELD") {
-    return { success: false, error: `Cannot release hold with status: ${hold.status}` };
+  const effectiveStatus = getEffectiveHoldStatus(hold);
+  if (effectiveStatus !== "HELD") {
+    return { success: false, error: `Cannot release hold with status: ${effectiveStatus}` };
+  }
+
+  // Release seat locks
+  for (const seatId of hold.seatIds) {
+    releaseSeatLock(hold.showId, seatId, userId);
   }
 
   hold.status = "RELEASED";
@@ -191,31 +412,15 @@ export function releaseHold(
 
 // ==================== Order Functions ====================
 
-function isOrderExpired(order: Order): boolean {
-  return order.status === "PAYMENT_PENDING" && new Date(order.expiresAt) < new Date();
-}
-
-function updateOrderStatusIfExpired(order: Order): Order {
-  if (isOrderExpired(order)) {
-    order.status = "EXPIRED";
-    orders.set(order.orderId, order);
-
-    // Also release the associated hold
-    const hold = holds.get(order.holdId);
-    if (hold && hold.status === "HELD") {
-      hold.status = "RELEASED";
-      holds.set(hold.holdId, hold);
-    }
-  }
-  return order;
-}
+// Default price per seat when show is from Lambda API (not in mock data)
+const DEFAULT_SEAT_PRICE = 350;
 
 export function createOrder(
   holdId: string,
   userId: string,
   customer: { name: string; email: string; phone: string }
 ): { order?: Order; error?: string } {
-  const hold = getHold(holdId);
+  const hold = holds.get(holdId);
   if (!hold) {
     return { error: "Hold not found" };
   }
@@ -224,19 +429,16 @@ export function createOrder(
     return { error: "Unauthorized" };
   }
 
-  if (hold.status !== "HELD") {
-    return { error: `Cannot create order from hold with status: ${hold.status}` };
+  const effectiveStatus = getEffectiveHoldStatus(hold);
+  if (effectiveStatus !== "HELD") {
+    return { error: `Cannot create order from hold with status: ${effectiveStatus}` };
   }
 
+  // Try to get show from mock data, but don't fail if not found
   const show = getShowById(hold.showId);
-  if (!show) {
-    return { error: "Show not found" };
-  }
-
-  const movie = getMovieById(show.movieId);
-  if (!movie) {
-    return { error: "Movie not found" };
-  }
+  const price = show?.price ?? DEFAULT_SEAT_PRICE;
+  const movieId = show?.movieId ?? "lambda-movie";
+  const theatreId = show?.theatreId ?? "lambda-theatre";
 
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ORDER_TTL_MS);
@@ -246,11 +448,11 @@ export function createOrder(
     holdId: hold.holdId,
     userId,
     showId: hold.showId,
-    movieId: show.movieId,
-    theatreId: show.theatreId,
+    movieId,
+    theatreId,
     seatIds: hold.seatIds,
     customer,
-    amount: show.price * hold.quantity,
+    amount: price * hold.quantity,
     status: "PAYMENT_PENDING",
     createdAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
@@ -263,14 +465,19 @@ export function createOrder(
 export function getOrder(orderId: string): Order | undefined {
   const order = orders.get(orderId);
   if (!order) return undefined;
-  return updateOrderStatusIfExpired(order);
+
+  // Return with effective status (no storage update)
+  return {
+    ...order,
+    status: getEffectiveOrderStatus(order),
+  };
 }
 
 export function confirmOrderPayment(
   orderId: string,
   userId: string
 ): { order?: Order; error?: string } {
-  const order = getOrder(orderId);
+  const order = orders.get(orderId);
   if (!order) {
     return { error: "Order not found" };
   }
@@ -279,33 +486,72 @@ export function confirmOrderPayment(
     return { error: "Unauthorized" };
   }
 
-  if (order.status !== "PAYMENT_PENDING") {
-    return { error: `Cannot confirm payment for order with status: ${order.status}` };
+  const effectiveStatus = getEffectiveOrderStatus(order);
+  if (effectiveStatus !== "PAYMENT_PENDING") {
+    return { error: `Cannot confirm payment for order with status: ${effectiveStatus}` };
   }
 
   // Generate ticket code
-  const ticketCode = `BMSCLONE-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+  const ticketCode = `BMS-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
   order.status = "CONFIRMED";
   order.ticketCode = ticketCode;
   orders.set(orderId, order);
 
-  // Update hold status
+  // Mark seats as permanently sold (update seat versions)
   const hold = holds.get(order.holdId);
   if (hold) {
-    // Keep hold as is but it's now associated with confirmed order
-    holds.set(hold.holdId, hold);
+    for (const seatId of hold.seatIds) {
+      const key = getSeatVersionKey(hold.showId, seatId);
+      const current = getSeatVersion(hold.showId, seatId);
+      seatVersions.set(key, {
+        version: current.version + 1,
+        lockedBy: "SOLD",
+        lockedAt: null, // Permanent
+      });
+    }
   }
 
   return { order };
 }
 
-// ==================== Debug Functions ====================
+// ==================== Utility: Get Queue Stats ====================
 
-export function getAllHolds(): Hold[] {
-  return Array.from(holds.values());
+export function getQueueStats(): Record<string, number> {
+  const stats: Record<string, number> = {};
+  for (const [key, queue] of bookingQueues.entries()) {
+    stats[key] = queue.length;
+  }
+  return stats;
 }
 
-export function getAllOrders(): Order[] {
-  return Array.from(orders.values());
+// ==================== Utility: Cleanup Expired (Optional Background Job) ====================
+
+export function cleanupExpired(): { holdsCleared: number; ordersCleared: number } {
+  let holdsCleared = 0;
+  let ordersCleared = 0;
+
+  // Cleanup expired holds
+  for (const [holdId, hold] of holds.entries()) {
+    if (getEffectiveHoldStatus(hold) === "EXPIRED") {
+      // Release seat locks
+      for (const seatId of hold.seatIds) {
+        releaseSeatLock(hold.showId, seatId, hold.userId);
+      }
+      hold.status = "EXPIRED";
+      holds.set(holdId, hold);
+      holdsCleared++;
+    }
+  }
+
+  // Cleanup expired orders
+  for (const [orderId, order] of orders.entries()) {
+    if (getEffectiveOrderStatus(order) === "EXPIRED") {
+      order.status = "EXPIRED";
+      orders.set(orderId, order);
+      ordersCleared++;
+    }
+  }
+
+  return { holdsCleared, ordersCleared };
 }

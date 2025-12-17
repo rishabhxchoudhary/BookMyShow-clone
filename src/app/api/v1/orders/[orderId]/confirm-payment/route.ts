@@ -31,24 +31,26 @@ export async function POST(
     }
 
     const order = result.order!;
-    const show = getShowById(order.showId)!;
-    const movie = getMovieById(show.movieId)!;
-    const theatre = getTheatreById(show.theatreId)!;
+
+    // Try to get show/movie/theatre from mock data, use defaults if from Lambda
+    const show = getShowById(order.showId);
+    const movie = show ? getMovieById(show.movieId) : undefined;
+    const theatre = show ? getTheatreById(show.theatreId) : undefined;
 
     const response: OrderResponse = {
       orderId: order.orderId,
       status: order.status,
       movie: {
-        movieId: movie.movieId,
-        title: movie.title,
+        movieId: movie?.movieId ?? order.movieId,
+        title: movie?.title ?? "Movie",
       },
       theatre: {
-        theatreId: theatre.theatreId,
-        name: theatre.name,
+        theatreId: theatre?.theatreId ?? order.theatreId,
+        name: theatre?.name ?? "Theatre",
       },
       show: {
-        showId: show.showId,
-        startTime: show.startTime,
+        showId: show?.showId ?? order.showId,
+        startTime: show?.startTime ?? new Date().toISOString(),
       },
       seats: order.seatIds,
       amount: order.amount,

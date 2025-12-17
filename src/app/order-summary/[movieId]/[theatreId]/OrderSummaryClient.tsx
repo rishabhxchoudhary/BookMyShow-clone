@@ -173,111 +173,138 @@ export function OrderSummaryClient({
   const isPending = order.status === "PAYMENT_PENDING";
 
   return (
-    <div className="container mx-auto max-w-lg px-4 py-8">
-      {isConfirmed && (
-        <div className="mb-6 text-center">
-          <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-green-100">
-            <CheckCircle2 className="h-12 w-12 text-green-600" />
-          </div>
-          <h1 className="text-2xl font-bold text-green-600">Booking Confirmed!</h1>
-          <p className="mt-2 text-muted-foreground">
-            Your tickets have been booked successfully
-          </p>
-        </div>
-      )}
-
-      {isExpired && (
-        <Alert variant="destructive" className="mb-6">
-          <AlertTitle>Order Expired</AlertTitle>
-          <AlertDescription>
-            Your payment window has expired. Please try booking again.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {isPending && timeLeft !== null && (
-        <Alert className={`mb-6 ${timeLeft < 60 ? "border-destructive" : ""}`}>
-          <AlertTitle>Complete Payment</AlertTitle>
-          <AlertDescription>
-            Time remaining: <strong>{formatTime(timeLeft)}</strong>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {error && (
-        <Alert variant="destructive" className="mb-6">
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>Order Summary</CardTitle>
-            <Badge
-              variant={
-                isConfirmed ? "success" : isExpired ? "destructive" : "secondary"
-              }
-            >
-              {order.status.replace("_", " ")}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Movie Details */}
-          <div>
-            <h3 className="font-semibold">{order.movie.title}</h3>
-            <p className="text-sm text-muted-foreground">{order.theatre.name}</p>
-          </div>
-
-          {/* Show Time */}
-          <div className="flex items-center justify-between border-t pt-4">
-            <span className="text-sm text-muted-foreground">Show Time</span>
-            <span className="font-medium">{formatShowTime(order.show.startTime)}</span>
-          </div>
-
-          {/* Seats */}
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">Seats</span>
-            <span className="font-medium">{order.seats.join(", ")}</span>
-          </div>
-
-          {/* Amount */}
-          <div className="flex items-center justify-between border-t pt-4">
-            <span className="text-sm text-muted-foreground">Total Amount</span>
-            <span className="text-xl font-bold">Rs. {order.amount}</span>
-          </div>
-
-          {/* Ticket Code (if confirmed) */}
-          {isConfirmed && order.ticketCode && (
-            <div className="rounded-lg bg-muted p-4 text-center">
-              <p className="text-sm text-muted-foreground">Ticket Code</p>
-              <p className="text-2xl font-bold tracking-wider">{order.ticketCode}</p>
+    <div className="min-h-screen bg-[#f5f5f5]">
+      <div className="container mx-auto max-w-lg px-4 py-8">
+        {isConfirmed && (
+          <div className="mb-6 text-center">
+            <div className="mx-auto mb-4 flex h-24 w-24 items-center justify-center rounded-full bg-green-100">
+              <CheckCircle2 className="h-14 w-14 text-green-600" />
             </div>
-          )}
+            <h1 className="text-2xl font-bold text-green-600">Booking Confirmed!</h1>
+            <p className="mt-2 text-gray-500">
+              Your tickets have been booked successfully
+            </p>
+          </div>
+        )}
 
-          {/* Action Buttons */}
-          {isPending && !isExpired && (
-            <Button
-              className="w-full"
-              size="lg"
-              onClick={handlePayment}
-              disabled={paying}
-            >
-              {paying ? "Processing Payment..." : `Pay Rs. ${order.amount}`}
-            </Button>
-          )}
+        {isExpired && (
+          <Alert variant="destructive" className="mb-6 border-red-200 bg-red-50">
+            <AlertTitle className="text-red-700">Order Expired</AlertTitle>
+            <AlertDescription className="text-red-600">
+              Your payment window has expired. Please try booking again.
+            </AlertDescription>
+          </Alert>
+        )}
 
-          {(isConfirmed || isExpired) && (
-            <Link href="/" className="block">
-              <Button variant={isConfirmed ? "default" : "outline"} className="w-full">
-                {isConfirmed ? "Book More Tickets" : "Browse Movies"}
+        {isPending && timeLeft !== null && (
+          <div className={`mb-6 p-4 rounded-lg ${timeLeft < 60 ? "bg-red-50 border border-red-200" : "bg-orange-50 border border-orange-200"}`}>
+            <p className={`text-sm font-medium ${timeLeft < 60 ? "text-red-700" : "text-orange-700"}`}>
+              Complete payment in <span className="text-lg font-bold">{formatTime(timeLeft)}</span>
+            </p>
+          </div>
+        )}
+
+        {error && (
+          <Alert variant="destructive" className="mb-6 border-red-200 bg-red-50">
+            <AlertTitle className="text-red-700">Error</AlertTitle>
+            <AlertDescription className="text-red-600">{error}</AlertDescription>
+          </Alert>
+        )}
+
+        <Card className="shadow-sm overflow-hidden">
+          <CardHeader className="bg-[#1a1a2e] text-white">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-lg">Order Summary</CardTitle>
+              <Badge
+                variant={isConfirmed ? "success" : isExpired ? "destructive" : "secondary"}
+                className={
+                  isConfirmed
+                    ? "bg-green-500 text-white"
+                    : isExpired
+                      ? "bg-red-500 text-white"
+                      : "bg-orange-500 text-white"
+                }
+              >
+                {order.status.replace("_", " ")}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="p-5 space-y-4">
+            {/* Movie Details */}
+            <div className="pb-4 border-b">
+              <h3 className="font-bold text-[#1a1a2e] text-lg">{order.movie.title}</h3>
+              <p className="text-sm text-gray-500 mt-1">{order.theatre.name}</p>
+            </div>
+
+            {/* Show Time */}
+            <div className="flex items-center justify-between py-2">
+              <span className="text-sm text-gray-500">Show Time</span>
+              <span className="font-medium text-[#1a1a2e]">{formatShowTime(order.show.startTime)}</span>
+            </div>
+
+            {/* Seats */}
+            <div className="flex items-center justify-between py-2">
+              <span className="text-sm text-gray-500">Seats</span>
+              <div className="flex flex-wrap gap-1 justify-end">
+                {order.seats.map(seat => (
+                  <span key={seat} className="px-2 py-0.5 bg-gray-100 rounded text-sm font-medium text-[#1a1a2e]">
+                    {seat}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Amount */}
+            <div className="flex items-center justify-between pt-4 border-t">
+              <span className="text-gray-600 font-medium">Total Amount</span>
+              <span className="text-2xl font-bold text-[#dc3558]">Rs. {order.amount}</span>
+            </div>
+
+            {/* Ticket Code (if confirmed) */}
+            {isConfirmed && order.ticketCode && (
+              <div className="rounded-lg bg-green-50 border border-green-200 p-5 text-center mt-4">
+                <p className="text-sm text-green-700 mb-1">Your Ticket Code</p>
+                <p className="text-3xl font-bold tracking-widest text-green-800">{order.ticketCode}</p>
+                <p className="text-xs text-green-600 mt-2">Show this code at the theatre</p>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            {isPending && !isExpired && (
+              <Button
+                className="w-full bg-[#dc3558] hover:bg-[#c42a4a] text-white py-6 text-lg font-semibold mt-4"
+                size="lg"
+                onClick={handlePayment}
+                disabled={paying}
+              >
+                {paying ? (
+                  <span className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Processing Payment...
+                  </span>
+                ) : (
+                  `Pay Rs. ${order.amount}`
+                )}
               </Button>
-            </Link>
-          )}
-        </CardContent>
-      </Card>
+            )}
+
+            {(isConfirmed || isExpired) && (
+              <Link href="/" className="block mt-4">
+                <Button
+                  variant={isConfirmed ? "default" : "outline"}
+                  className={`w-full py-6 text-base font-semibold ${
+                    isConfirmed
+                      ? "bg-[#dc3558] hover:bg-[#c42a4a] text-white"
+                      : "border-[#dc3558] text-[#dc3558] hover:bg-[#dc3558] hover:text-white"
+                  }`}
+                >
+                  {isConfirmed ? "Book More Tickets" : "Browse Movies"}
+                </Button>
+              </Link>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

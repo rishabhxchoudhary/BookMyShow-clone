@@ -1,17 +1,14 @@
 import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { bmsAPI, type MovieDetailsResponse } from "@/lib/api-client";
 import type { Movie } from "@/lib/types";
 
 async function getMovie(movieId: string): Promise<Movie | null> {
   try {
     const response = await bmsAPI.getMovieById(movieId) as MovieDetailsResponse;
-    
-    // Transform Lambda API response to match frontend types
+
     const movie: Movie = {
       movieId: response.movie_id,
       title: response.title,
@@ -24,10 +21,10 @@ async function getMovie(movieId: string): Promise<Movie | null> {
       language: response.language,
       format: response.format,
       genres: response.genres || [],
-      cast: [], // Lambda API doesn't provide cast data yet
-      crew: [], // Lambda API doesn't provide crew data yet
+      cast: [],
+      crew: [],
     };
-    
+
     return movie;
   } catch (error) {
     console.error('Failed to fetch movie from Lambda API:', error);
@@ -56,56 +53,82 @@ export default async function MovieDetailPage({
   const today = new Date().toISOString().split("T")[0];
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen bg-[#f5f5f5]">
       {/* Hero Section */}
-      <div className="relative h-[400px] w-full overflow-hidden bg-gradient-to-b from-gray-900 to-background">
-        <div className="absolute inset-0 bg-black/50" />
-        <Image
-          src={movie.thumbnailUrl}
-          alt={movie.title}
-          fill
-          className="object-cover opacity-30"
-          priority
-        />
-        <div className="container relative mx-auto flex h-full items-end px-4 pb-8">
-          <div className="flex gap-6">
-            <div className="relative hidden h-[300px] w-[200px] shrink-0 overflow-hidden rounded-lg shadow-xl sm:block">
+      <div className="relative w-full overflow-hidden bg-gradient-to-b from-[#1a1a2e] to-[#2d2d44]">
+        <div className="absolute inset-0">
+          <Image
+            src={movie.thumbnailUrl}
+            alt={movie.title}
+            fill
+            className="object-cover opacity-20 blur-sm"
+            priority
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#1a1a2e] via-[#1a1a2e]/80 to-transparent" />
+        </div>
+
+        <div className="container relative mx-auto px-4 py-8 md:py-12">
+          <div className="flex flex-col md:flex-row gap-6 md:gap-8">
+            {/* Movie Poster */}
+            <div className="relative mx-auto md:mx-0 h-[280px] w-[190px] md:h-[350px] md:w-[240px] shrink-0 overflow-hidden rounded-lg shadow-2xl">
               <Image
                 src={movie.thumbnailUrl}
                 alt={movie.title}
                 fill
                 className="object-cover"
               />
+              {/* Rating Badge on Poster */}
+              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent p-3">
+                <div className="flex items-center gap-1.5">
+                  <svg className="h-4 w-4 text-[#dc3558]" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                  </svg>
+                  <span className="text-sm font-bold text-white">{movie.rating}/10</span>
+                </div>
+              </div>
             </div>
-            <div className="flex flex-col justify-end text-white">
-              <h1 className="text-3xl font-bold md:text-4xl">{movie.title}</h1>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Badge variant="secondary" className="bg-green-600 text-white">
-                  {movie.rating}/10
-                </Badge>
-                <span className="text-sm text-gray-300">
+
+            {/* Movie Info */}
+            <div className="flex flex-col justify-center text-center md:text-left">
+              <h1 className="text-2xl md:text-4xl font-bold text-white mb-3">
+                {movie.title}
+              </h1>
+
+              {/* Meta Info */}
+              <div className="flex flex-wrap items-center justify-center md:justify-start gap-2 mb-4">
+                <span className="px-2 py-1 bg-white/10 rounded text-sm text-white">
                   {formatDuration(movie.durationMins)}
                 </span>
-                <span className="text-gray-400">|</span>
-                <span className="text-sm text-gray-300">{movie.ageRating}</span>
-                <span className="text-gray-400">|</span>
-                <span className="text-sm text-gray-300">{movie.releaseDate}</span>
+                <span className="px-2 py-1 bg-white/10 rounded text-sm text-white">
+                  {movie.ageRating}
+                </span>
+                <span className="px-2 py-1 bg-white/10 rounded text-sm text-white">
+                  {movie.language}
+                </span>
               </div>
-              <div className="mt-2 flex flex-wrap gap-2">
+
+              {/* Genres */}
+              <div className="flex flex-wrap justify-center md:justify-start gap-2 mb-4">
                 {movie.genres.map((genre) => (
-                  <Badge key={genre} variant="outline" className="border-gray-400 text-gray-300">
+                  <span key={genre} className="px-3 py-1 border border-white/30 rounded-full text-sm text-white/90">
                     {genre}
-                  </Badge>
+                  </span>
                 ))}
               </div>
-              <div className="mt-2 text-sm text-gray-300">
-                {movie.language} | {movie.format}
+
+              {/* Release Date */}
+              <p className="text-sm text-white/70 mb-6">
+                Release Date: {movie.releaseDate} | {movie.format}
+              </p>
+
+              {/* Book Button */}
+              <div className="flex justify-center md:justify-start">
+                <Link href={`/movies/${movieId}/buytickets/${today}`}>
+                  <Button size="lg" className="bg-[#dc3558] hover:bg-[#c42a4a] text-white px-8 py-6 text-lg font-semibold rounded-lg shadow-lg">
+                    Book Tickets
+                  </Button>
+                </Link>
               </div>
-              <Link href={`/movies/${movieId}/buytickets/${today}`} className="mt-4">
-                <Button size="lg" className="bg-rose-600 hover:bg-rose-700">
-                  Book Tickets
-                </Button>
-              </Link>
             </div>
           </div>
         </div>
@@ -113,66 +136,12 @@ export default async function MovieDetailPage({
 
       {/* About Section */}
       <div className="container mx-auto px-4 py-8">
-        <section className="mb-8">
-          <h2 className="mb-4 text-xl font-bold">About the movie</h2>
-          <p className="text-muted-foreground">{movie.about}</p>
-        </section>
-
-        {/* Cast Section */}
-        {movie.cast && movie.cast.length > 0 && (
-          <section className="mb-8">
-            <h2 className="mb-4 text-xl font-bold">Cast</h2>
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-              {movie.cast.map((member) => (
-                <Card key={member.name} className="overflow-hidden">
-                  <div className="relative aspect-square">
-                    <Image
-                      src={member.imageUrl}
-                      alt={member.name}
-                      fill
-                      className="object-cover"
-                    />
-                  </div>
-                  <CardContent className="p-3">
-                    <p className="line-clamp-1 text-sm font-medium">{member.name}</p>
-                    {member.role && (
-                      <p className="line-clamp-1 text-xs text-muted-foreground">
-                        as {member.role}
-                      </p>
-                    )}
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* Crew Section */}
-        {movie.crew && movie.crew.length > 0 && (
-          <section>
-            <h2 className="mb-4 text-xl font-bold">Crew</h2>
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-              {movie.crew.map((member) => (
-                <Card key={member.name} className="overflow-hidden">
-                  <div className="relative aspect-square">
-                    <Image
-                      src={member.imageUrl}
-                      alt={member.name}
-                      fill
-                      className="object-cover"
-                    />
-                  </div>
-                  <CardContent className="p-3">
-                    <p className="line-clamp-1 text-sm font-medium">{member.name}</p>
-                    <p className="line-clamp-1 text-xs text-muted-foreground">
-                      {member.role}
-                    </p>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </section>
-        )}
+        <div className="bg-white rounded-lg shadow-sm p-6">
+          <h2 className="text-xl font-bold text-[#1a1a2e] mb-4">About the movie</h2>
+          <p className="text-gray-600 leading-relaxed">
+            {movie.about || "No description available for this movie."}
+          </p>
+        </div>
       </div>
     </div>
   );

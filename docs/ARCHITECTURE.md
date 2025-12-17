@@ -1,68 +1,97 @@
 # BookMyShow Clone - Architecture Documentation
 
 ## Table of Contents
-1. [Current Implementation](#current-implementation)
+1. [System Overview](#system-overview)
+2. [Current Implementation](#current-implementation)
+   - [Hybrid Architecture](#hybrid-architecture)
    - [Seat Locking Mechanism](#seat-locking-mechanism)
-   - [Booking Flow](#booking-flow)
-   - [State Machines](#state-machines)
-2. [Scaling to Billions of Users on AWS](#scaling-to-billions-of-users-on-aws)
-   - [High-Level Architecture](#high-level-architecture)
-   - [Component Deep Dive](#component-deep-dive)
-   - [Data Flow](#data-flow)
-   - [Handling Flash Sales](#handling-flash-sales)
+   - [Booking Queue System](#booking-queue-system)
+   - [Optimistic Locking](#optimistic-locking)
+3. [Booking Flow](#booking-flow)
+4. [State Machines](#state-machines)
+5. [Scaling to Production](#scaling-to-production)
+
+---
+
+## System Overview
+
+This BookMyShow clone uses a **hybrid architecture** combining:
+- **AWS Lambda Backend**: For movie/show data (PostgreSQL + Redis)
+- **Next.js Local API**: For booking operations (in-memory store with advanced locking)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         HYBRID ARCHITECTURE                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Browser/Client                                                            │
+│        │                                                                    │
+│        ▼                                                                    │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │                      Next.js Application                            │   │
+│   │                                                                     │   │
+│   │  ┌───────────────────────┐    ┌────────────────────────────────┐   │   │
+│   │  │   Local API Routes    │    │    Lambda API Client           │   │   │
+│   │  │   /api/v1/holds       │    │    (movies, shows, seatmap)    │   │   │
+│   │  │   /api/v1/orders      │    │                                │   │   │
+│   │  │   /api/v1/shows/      │    │                                │   │   │
+│   │  │   [showId]/seatmap    │    │                                │   │   │
+│   │  └───────────┬───────────┘    └────────────────┬───────────────┘   │   │
+│   │              │                                  │                   │   │
+│   │              ▼                                  ▼                   │   │
+│   │  ┌───────────────────────┐    ┌────────────────────────────────┐   │   │
+│   │  │   Memory Store        │    │    AWS API Gateway             │   │   │
+│   │  │   - Holds             │    │    ↓                           │   │   │
+│   │  │   - Orders            │    │    AWS Lambda Functions        │   │   │
+│   │  │   - Seat Versions     │    │    ↓                           │   │   │
+│   │  │   - Booking Queues    │    │    PostgreSQL + Redis          │   │   │
+│   │  └───────────────────────┘    └────────────────────────────────┘   │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## Current Implementation
 
+### Hybrid Architecture
+
+The system uses two data paths:
+
+| Operation | Data Source | Reason |
+|-----------|-------------|--------|
+| List Movies | Lambda API → PostgreSQL | Centralized movie catalog |
+| Movie Details | Lambda API → PostgreSQL | Centralized movie data |
+| Show Times | Lambda API → PostgreSQL | Centralized scheduling |
+| Base Seat Map | Lambda API → Redis | Seat layout from backend |
+| **Seat Holds** | **Local Memory Store** | Fast, consistent local locking |
+| **Orders** | **Local Memory Store** | Consistent with holds |
+| **Combined Seatmap** | **Local API (merges both)** | Unified availability view |
+
+#### Why Hybrid?
+- Lambda `/orders` endpoint had issues
+- Local store ensures consistency between holds and orders
+- Local seatmap API merges Lambda base data with local holds
+- Enables advanced features: queue partitioning, optimistic locking
+
 ### Seat Locking Mechanism
 
-The current implementation uses an **in-memory optimistic locking** strategy with TTL-based expiration.
-
-#### How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     SEAT LOCKING FLOW                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  User Selects Seats                                             │
-│         │                                                       │
-│         ▼                                                       │
-│  ┌─────────────────┐                                            │
-│  │ Check Conflicts │◄─── Query holds Map + orders Map           │
-│  └────────┬────────┘                                            │
-│           │                                                     │
-│     ┌─────┴─────┐                                               │
-│     │           │                                               │
-│  Conflict?   No Conflict                                        │
-│     │           │                                               │
-│     ▼           ▼                                               │
-│  Return 409  ┌─────────────────┐                                │
-│              │ Release User's  │                                │
-│              │ Previous Hold   │                                │
-│              │ (if exists)     │                                │
-│              └────────┬────────┘                                │
-│                       │                                         │
-│                       ▼                                         │
-│              ┌─────────────────┐                                │
-│              │ Create New Hold │                                │
-│              │ TTL = 5 minutes │                                │
-│              └────────┬────────┘                                │
-│                       │                                         │
-│                       ▼                                         │
-│              Return holdId + expiresAt                          │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+The current implementation uses **in-memory optimistic locking** with:
+- **10-minute TTL** for holds
+- **Expiration check on GET** (no database writes)
+- **Multiple holds per user** (each tab/session independent)
 
 #### Key Data Structures
 
 ```typescript
-// In-memory storage (current implementation)
+// In-memory storage
 const holds = new Map<string, Hold>();
 const orders = new Map<string, Order>();
+const seatVersions = new Map<string, SeatVersion>();  // For optimistic locking
+const bookingQueues = new Map<string, QueuedBooking[]>();  // Partitioned queues
 
+// Hold with 10-minute TTL
 interface Hold {
   holdId: string;
   showId: string;
@@ -71,48 +100,167 @@ interface Hold {
   quantity: number;
   status: "HELD" | "EXPIRED" | "RELEASED";
   createdAt: string;
-  expiresAt: string;      // TTL timestamp
+  expiresAt: string;      // TTL = 10 minutes
+}
+
+// Seat version for optimistic locking
+interface SeatVersion {
+  version: number;
+  lockedBy: string | null;
+  lockedAt: number | null;
 }
 ```
 
-#### Conflict Detection Algorithm
+#### Expiration Without Database Writes
 
 ```typescript
-function checkSeatAvailability(showId: string, requestedSeats: string[], userId: string) {
-  // 1. Get all active holds for this show (excluding user's own hold)
-  const heldSeats = getHeldSeatIdsForShow(showId, userId);
-
-  // 2. Get all confirmed bookings for this show
-  const confirmedSeats = getConfirmedSeatIdsForShow(showId);
-
-  // 3. Get permanently unavailable seats (broken, reserved)
-  const unavailable = permanentlyUnavailableSeats;
-
-  // 4. Merge all unavailable seats
-  const allUnavailable = [...unavailable, ...heldSeats, ...confirmedSeats];
-
-  // 5. Check for conflicts
-  const conflicts = requestedSeats.filter(seat => allUnavailable.includes(seat));
-
-  return { hasConflict: conflicts.length > 0, conflicts };
-}
-```
-
-#### TTL Expiration Handling
-
-The system uses **lazy expiration** - holds are checked and marked expired on read:
-
-```typescript
-function updateHoldStatusIfExpired(hold: Hold): Hold {
+// Expiration check happens on READ, not WRITE
+function getEffectiveHoldStatus(hold: Hold): Hold["status"] {
   if (hold.status === "HELD" && new Date(hold.expiresAt) < new Date()) {
-    hold.status = "EXPIRED";
-    holds.set(hold.holdId, hold);
+    return "EXPIRED";  // Returns EXPIRED status without updating storage
   }
-  return hold;
+  return hold.status;
+}
+
+// When fetching seat availability, expired holds are treated as available
+function getHeldSeatIdsForShow(showId: string): string[] {
+  const result: string[] = [];
+  for (const hold of holds.values()) {
+    if (hold.showId === showId) {
+      const effectiveStatus = getEffectiveHoldStatus(hold);
+      if (effectiveStatus === "HELD") {
+        result.push(...hold.seatIds);
+      }
+      // Expired holds are NOT included - seats appear available
+    }
+  }
+  return result;
 }
 ```
 
-### Booking Flow
+### Booking Queue System
+
+Handles high-concurrency scenarios with partitioned queues:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       QUEUE PARTITIONING STRATEGY                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Queue Key Pattern: {showId}:{tier}                                        │
+│                                                                             │
+│   Seat Tier Classification:                                                 │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │  TIER 1 (Premium/Front)     │  TIER 2 (Regular/Back)               │   │
+│   │  Rows A, B, C, D, E         │  Rows F, G, H, I, J, K...            │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│   Example Queues:                                                           │
+│   ┌─────────────────────────────┐  ┌─────────────────────────────────┐     │
+│   │ show_123:tier1              │  │ show_123:tier2                  │     │
+│   │ ├── Booking 1 (seats A1-A2) │  │ ├── Booking 3 (seats F1-F4)     │     │
+│   │ ├── Booking 2 (seats B3-B4) │  │ ├── Booking 4 (seats G2-G3)     │     │
+│   │ └── ...                     │  │ └── ...                         │     │
+│   └─────────────────────────────┘  └─────────────────────────────────┘     │
+│                                                                             │
+│   Benefits:                                                                 │
+│   - Parallel processing of different seat tiers                             │
+│   - Premium seats don't block regular seat bookings                         │
+│   - Reduced queue contention                                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```typescript
+// Tier determination
+function getSeatTier(seatId: string): "tier1" | "tier2" {
+  const row = seatId.charAt(0).toUpperCase();
+  return row <= "E" ? "tier1" : "tier2";  // A-E = premium, F-Z = regular
+}
+
+// Queue processing (async version for high-concurrency)
+async function createHoldAsync(showId, userId, seatIds, quantity) {
+  const tier = getPrimaryTier(seatIds);
+  const queueKey = `${showId}:${tier}`;
+
+  return new Promise((resolve) => {
+    bookingQueues.get(queueKey).push({
+      showId, userId, seatIds, quantity, resolve
+    });
+    processQueue(queueKey);  // Serial processing within partition
+  });
+}
+```
+
+### Optimistic Locking
+
+Prevents race conditions when multiple users try to book the same seat:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       OPTIMISTIC LOCKING FLOW                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   User A (booking A1)                User B (booking A1)                    │
+│         │                                    │                              │
+│   1. Read seat version                 1. Read seat version                 │
+│      A1: version=5                        A1: version=5                     │
+│         │                                    │                              │
+│   2. Check seat available ✓            2. Check seat available ✓            │
+│         │                                    │                              │
+│   3. Try lock with version=5           3. Try lock with version=5           │
+│      ↓                                       ↓                              │
+│   ┌─────────────────────┐              ┌─────────────────────┐              │
+│   │ Check: current == 5 │              │ Check: current == 6 │              │
+│   │ Result: YES ✓       │              │ Result: NO ✗        │              │
+│   │ Lock acquired       │              │ Version mismatch!   │              │
+│   │ Version → 6         │              │ Seat was just taken │              │
+│   └─────────────────────┘              └─────────────────────┘              │
+│         │                                    │                              │
+│   4. Hold created                      4. Return error:                     │
+│      Success!                             "Seat A1 was just taken"          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```typescript
+function tryAcquireSeatLock(
+  showId: string,
+  seatId: string,
+  userId: string,
+  expectedVersion: number
+): { success: boolean; currentVersion: number } {
+  const current = getSeatVersion(showId, seatId);
+
+  // Check if already locked by another user (and not expired)
+  if (current.lockedBy && current.lockedBy !== userId && current.lockedAt) {
+    const lockAge = Date.now() - current.lockedAt;
+    if (lockAge < HOLD_TTL_MS) {
+      return { success: false, currentVersion: current.version };
+    }
+  }
+
+  // Optimistic locking: version must match
+  if (current.version !== expectedVersion) {
+    return { success: false, currentVersion: current.version };
+  }
+
+  // Acquire lock with version increment
+  seatVersions.set(key, {
+    version: current.version + 1,
+    lockedBy: userId,
+    lockedAt: Date.now(),
+  });
+
+  return { success: true, currentVersion: current.version + 1 };
+}
+```
+
+---
+
+## Booking Flow
+
+### Complete Flow Diagram
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -124,8 +272,9 @@ function updateHoldStatusIfExpired(hold: Hold): Hold {
 │  │  Movies  │    │   Show   │    │  Seats   │    │   Hold   │    │Order │ │
 │  └──────────┘    └──────────┘    └──────────┘    └──────────┘    └──┬───┘ │
 │                                                                      │     │
-│  GET /movies     GET /shows      Client-side    POST /holds     POST /orders
-│                                  interaction    (Auth required) (Auth req) │
+│  Lambda API      Lambda API      Local API       Local API      Local API │
+│  GET /movies     GET /shows      GET /seatmap    POST /holds    POST /orders
+│                                  (merged)        (10 min TTL)   (5 min TTL)│
 │                                                                      │     │
 │                                                                      ▼     │
 │                                                              ┌──────────┐  │
@@ -133,7 +282,7 @@ function updateHoldStatusIfExpired(hold: Hold): Hold {
 │                                                              │ Payment  │  │
 │                                                              └──────────┘  │
 │                                                                      │     │
-│                                                    POST /orders/{id}/confirm-payment
+│                                                    POST /orders/{id}/confirm
 │                                                                      │     │
 │                                                                      ▼     │
 │                                                              ┌──────────┐  │
@@ -143,22 +292,54 @@ function updateHoldStatusIfExpired(hold: Hold): Hold {
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### API Call Sequence
+### API Call Sequence
 
-| Step | Endpoint | Auth | Purpose |
-|------|----------|------|---------|
-| 1 | `GET /api/v1/movies` | No | List movies |
-| 2 | `GET /api/v1/movies/{id}` | No | Movie details |
-| 3 | `GET /api/v1/movies/{id}/availability` | No | Available dates |
-| 4 | `GET /api/v1/movies/{id}/shows?date=` | No | Shows by date |
-| 5 | `GET /api/v1/shows/{id}/seatmap` | No | Seat layout + availability |
-| 6 | `POST /api/v1/holds` | **Yes** | Lock seats (5 min TTL) |
-| 7 | `POST /api/v1/orders` | **Yes** | Create order from hold |
-| 8 | `POST /api/v1/orders/{id}/confirm-payment` | **Yes** | Mock payment confirmation |
+| Step | Endpoint | Source | Auth | Purpose |
+|------|----------|--------|------|---------|
+| 1 | `GET /movies` | Lambda | No | List movies |
+| 2 | `GET /movies/{id}` | Lambda | No | Movie details |
+| 3 | `GET /movies/{id}/shows?date=` | Lambda | No | Shows by date |
+| 4 | `GET /api/v1/shows/{id}/seatmap` | **Local** | No | Combined seat map |
+| 5 | `POST /api/v1/holds` | **Local** | **Yes** | Lock seats (10 min TTL) |
+| 6 | `POST /api/v1/orders` | **Local** | **Yes** | Create order from hold |
+| 7 | `POST /api/v1/orders/{id}/confirm-payment` | **Local** | **Yes** | Confirm payment |
 
-### State Machines
+### Seatmap Merging
 
-#### Hold State Machine
+The local seatmap API combines data from Lambda and local memory:
+
+```typescript
+// GET /api/v1/shows/[showId]/seatmap
+export async function GET(request, { params }) {
+  // 1. Get base seatmap from Lambda (layout + Lambda-side bookings)
+  const lambdaSeatmap = await bmsAPI.getSeatmap(showId);
+
+  // 2. Get locally held seats
+  const localHeldSeats = getHeldSeatIdsForShow(showId);
+
+  // 3. Get locally confirmed seats
+  const localConfirmedSeats = getConfirmedSeatIdsForShow(showId);
+
+  // 4. Merge all unavailable seats
+  const allUnavailable = [...new Set([
+    ...lambdaSeatmap.unavailableSeatIds,
+    ...localConfirmedSeats,
+  ])];
+
+  const allHeld = [...new Set([
+    ...lambdaSeatmap.heldSeatIds,
+    ...localHeldSeats,
+  ])];
+
+  return { ...lambdaSeatmap, unavailableSeatIds: allUnavailable, heldSeatIds: allHeld };
+}
+```
+
+---
+
+## State Machines
+
+### Hold State Machine
 
 ```
                     ┌─────────┐
@@ -172,14 +353,17 @@ function updateHoldStatusIfExpired(hold: Hold): Hold {
           │        └────┬────┘        │
           │             │             │
     TTL expires    User releases   Order created
+    (10 min)           │             │
           │             │             │
           ▼             ▼             ▼
     ┌─────────┐   ┌──────────┐   (Hold stays HELD,
     │ EXPIRED │   │ RELEASED │    linked to order)
     └─────────┘   └──────────┘
+
+    Note: Expiration is checked on READ without DB writes
 ```
 
-#### Order State Machine
+### Order State Machine
 
 ```
                          ┌─────────┐
@@ -193,463 +377,142 @@ function updateHoldStatusIfExpired(hold: Hold): Hold {
           │        └────────┬────────┘        │
           │                 │                 │
     TTL expires      Payment confirmed   Payment failed
+    (5 min)                │                 │
           │                 │                 │
           ▼                 ▼                 ▼
     ┌─────────┐       ┌───────────┐      ┌────────┐
     │ EXPIRED │       │ CONFIRMED │      │ FAILED │
     └─────────┘       └───────────┘      └────────┘
-          │                                   │
-          │           User/Admin cancels      │
-          │                 │                 │
-          └────────────────►│◄────────────────┘
-                            ▼
-                      ┌───────────┐
-                      │ CANCELLED │
-                      └───────────┘
+                            │
+                      Ticket generated
+                      (BMS-XXXXXX)
 ```
 
 ---
 
-## Scaling to Billions of Users on AWS
+## Scaling to Production
 
-### High-Level Architecture
+### Current Limitations
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                        AWS PRODUCTION ARCHITECTURE                               │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                 │
-│    Users (Billions)                                                             │
-│         │                                                                       │
-│         ▼                                                                       │
-│    ┌─────────┐                                                                  │
-│    │Route 53 │ ◄── GeoDNS routing to nearest region                             │
-│    └────┬────┘                                                                  │
-│         │                                                                       │
-│         ▼                                                                       │
-│    ┌─────────────┐                                                              │
-│    │ CloudFront  │ ◄── CDN for static assets, API caching                       │
-│    │    (CDN)    │                                                              │
-│    └──────┬──────┘                                                              │
-│           │                                                                     │
-│           ▼                                                                     │
-│    ┌─────────────┐     ┌─────────────┐                                          │
-│    │    WAF      │────▶│   Shield    │ ◄── DDoS protection                      │
-│    └──────┬──────┘     └─────────────┘                                          │
-│           │                                                                     │
-│           ▼                                                                     │
-│    ┌─────────────────────────────────────────┐                                  │
-│    │        Application Load Balancer         │                                  │
-│    │         (Multi-AZ, Auto-scaling)         │                                  │
-│    └──────────────────┬──────────────────────┘                                  │
-│                       │                                                         │
-│         ┌─────────────┼─────────────┐                                           │
-│         ▼             ▼             ▼                                           │
-│    ┌─────────┐   ┌─────────┐   ┌─────────┐                                      │
-│    │  ECS    │   │  ECS    │   │  ECS    │  ◄── Fargate containers              │
-│    │ Task 1  │   │ Task 2  │   │ Task N  │      Auto-scaling 10-10000           │
-│    └────┬────┘   └────┬────┘   └────┬────┘                                      │
-│         │             │             │                                           │
-│         └─────────────┼─────────────┘                                           │
-│                       │                                                         │
-│    ┌──────────────────┼──────────────────┐                                      │
-│    │                  │                  │                                      │
-│    ▼                  ▼                  ▼                                      │
-│ ┌──────────┐    ┌───────────┐    ┌─────────────┐                                │
-│ │ ElastiCache│   │  Aurora    │    │    SQS      │                                │
-│ │  (Redis)  │    │ PostgreSQL │    │   Queues    │                                │
-│ │  Cluster  │    │  Cluster   │    │             │                                │
-│ └──────────┘    └───────────┘    └─────────────┘                                │
-│      │                │                  │                                      │
-│ Seat Locks       Persistent         Async Events                                │
-│ Session Cache    Data Store         (notifications)                             │
-│                                                                                 │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+| Limitation | Impact | Production Solution |
+|------------|--------|---------------------|
+| In-memory storage | Data loss on restart | Redis Cluster |
+| Single server | No horizontal scaling | ECS + ALB |
+| No persistent holds | Lost on deploy | Redis with persistence |
+| Race conditions (edge) | Rare double bookings | Redis Lua atomic scripts |
 
-### Component Deep Dive
-
-#### 1. Distributed Seat Locking with Redis
-
-Replace in-memory Map with Redis Cluster for distributed locking:
+### Production Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                 REDIS SEAT LOCKING STRATEGY                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Key Pattern: seat_lock:{showId}:{seatId}                       │
-│  Value: {userId}:{holdId}:{timestamp}                           │
-│  TTL: 300 seconds (5 minutes)                                   │
-│                                                                 │
-│  Example:                                                       │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ KEY: seat_lock:show_123:A1                              │    │
-│  │ VALUE: user_456:hold_789:1702828800000                  │    │
-│  │ TTL: 300s                                               │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      AWS PRODUCTION ARCHITECTURE                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│    Users                                                                    │
+│      │                                                                      │
+│      ▼                                                                      │
+│   ┌─────────────┐                                                           │
+│   │ CloudFront  │ ◄── CDN for static assets                                 │
+│   └──────┬──────┘                                                           │
+│          │                                                                  │
+│          ▼                                                                  │
+│   ┌─────────────┐                                                           │
+│   │ API Gateway │ ◄── Rate limiting, WAF                                    │
+│   └──────┬──────┘                                                           │
+│          │                                                                  │
+│          ▼                                                                  │
+│   ┌─────────────────────────────────────────────────────────────────┐       │
+│   │              Application Load Balancer                          │       │
+│   └───────────────────────────┬─────────────────────────────────────┘       │
+│                               │                                             │
+│         ┌─────────────────────┼─────────────────────┐                       │
+│         ▼                     ▼                     ▼                       │
+│   ┌───────────┐         ┌───────────┐         ┌───────────┐                 │
+│   │  ECS Task │         │  ECS Task │         │  ECS Task │                 │
+│   │  (Next.js)│         │  (Next.js)│         │  (Next.js)│                 │
+│   └─────┬─────┘         └─────┬─────┘         └─────┬─────┘                 │
+│         │                     │                     │                       │
+│         └─────────────────────┼─────────────────────┘                       │
+│                               │                                             │
+│    ┌──────────────────────────┼──────────────────────────┐                  │
+│    │                          │                          │                  │
+│    ▼                          ▼                          ▼                  │
+│ ┌──────────┐           ┌───────────┐             ┌─────────────┐            │
+│ │ElastiCache│          │   Aurora  │             │     SQS     │            │
+│ │  (Redis) │           │ PostgreSQL│             │   Queues    │            │
+│ │  Cluster │           │  Cluster  │             │             │            │
+│ └──────────┘           └───────────┘             └─────────────┘            │
+│      │                       │                         │                    │
+│ Seat Locks              Persistent              Async Events                │
+│ Hold Metadata           Data Store              (notifications)             │
+│ Queue State                                                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Atomic Locking with Lua Script:**
+### Redis Seat Locking (Production)
 
 ```lua
--- KEYS[1..N] = seat keys to lock
--- ARGV[1] = userId
--- ARGV[2] = holdId
--- ARGV[3] = TTL in seconds
+-- Atomic seat locking Lua script for Redis
+local showId = ARGV[1]
+local userId = ARGV[2]
+local holdId = ARGV[3]
+local ttl = tonumber(ARGV[4])
 
-local function atomicSeatLock(KEYS, ARGV)
-    local userId = ARGV[1]
-    local holdId = ARGV[2]
-    local ttl = tonumber(ARGV[3])
-
-    -- Phase 1: Check all seats are available
-    for i, key in ipairs(KEYS) do
-        local existing = redis.call('GET', key)
-        if existing then
-            -- Check if it's the same user (allow update)
-            local existingUserId = string.match(existing, "^([^:]+)")
-            if existingUserId ~= userId then
-                return {err = "CONFLICT", seat = key}
-            end
+-- Phase 1: Check all seats are available
+for i, seatId in ipairs(KEYS) do
+    local key = "seat_lock:" .. showId .. ":" .. seatId
+    local existing = redis.call('GET', key)
+    if existing then
+        local existingUserId = string.match(existing, "^([^:]+)")
+        if existingUserId ~= userId then
+            return {err = "CONFLICT", seat = seatId}
         end
     end
-
-    -- Phase 2: Lock all seats atomically
-    local value = userId .. ":" .. holdId .. ":" .. tostring(os.time())
-    for i, key in ipairs(KEYS) do
-        redis.call('SET', key, value, 'EX', ttl)
-    end
-
-    return {ok = true, holdId = holdId}
 end
+
+-- Phase 2: Lock all seats atomically
+local value = userId .. ":" .. holdId
+for i, seatId in ipairs(KEYS) do
+    local key = "seat_lock:" .. showId .. ":" .. seatId
+    redis.call('SET', key, value, 'EX', ttl)
+end
+
+return {ok = true}
 ```
 
-**Why Redis Cluster?**
+### Production Checklist
 
-| Feature | Benefit |
-|---------|---------|
-| Sub-millisecond latency | Fast seat availability checks |
-| Automatic TTL expiration | No background cleanup jobs needed |
-| Atomic operations (Lua) | Prevents race conditions |
-| Cluster mode | Horizontal scaling, 1M+ ops/sec |
-| Replication | High availability |
-
-#### 2. Database Layer (Aurora PostgreSQL)
-
-**Schema Design:**
-
-```sql
--- Partitioned by show_date for efficient queries and archival
-CREATE TABLE shows (
-    show_id UUID PRIMARY KEY,
-    movie_id UUID NOT NULL,
-    theatre_id UUID NOT NULL,
-    screen_id UUID NOT NULL,
-    show_date DATE NOT NULL,
-    start_time TIMESTAMPTZ NOT NULL,
-    price DECIMAL(10,2) NOT NULL,
-    status VARCHAR(20) DEFAULT 'SCHEDULED'
-) PARTITION BY RANGE (show_date);
-
--- Hot partition (current + next 7 days)
-CREATE TABLE shows_current PARTITION OF shows
-    FOR VALUES FROM (CURRENT_DATE) TO (CURRENT_DATE + INTERVAL '8 days');
-
--- Orders table with optimized indexes
-CREATE TABLE orders (
-    order_id UUID PRIMARY KEY,
-    user_id UUID NOT NULL,
-    show_id UUID NOT NULL,
-    seat_ids TEXT[] NOT NULL,
-    amount DECIMAL(10,2) NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    confirmed_at TIMESTAMPTZ,
-    ticket_code VARCHAR(50)
-);
-
--- Composite index for conflict detection
-CREATE INDEX idx_orders_show_status ON orders(show_id, status)
-    WHERE status = 'CONFIRMED';
-
--- Index for user's booking history
-CREATE INDEX idx_orders_user ON orders(user_id, created_at DESC);
-```
-
-**Read Replicas Strategy:**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    AURORA READ SCALING                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Write Operations (Orders, Confirmations)                       │
-│         │                                                       │
-│         ▼                                                       │
-│    ┌─────────┐                                                  │
-│    │ Primary │ ◄── Single writer, strong consistency            │
-│    │   (r6g) │                                                  │
-│    └────┬────┘                                                  │
-│         │ Async Replication (<10ms lag)                         │
-│         │                                                       │
-│    ┌────┴────────────────────────────┐                          │
-│    │              │                  │                          │
-│    ▼              ▼                  ▼                          │
-│ ┌───────┐    ┌───────┐          ┌───────┐                       │
-│ │Replica│    │Replica│   ...    │Replica│  ◄── Up to 15         │
-│ │  #1   │    │  #2   │          │  #15  │      replicas         │
-│ └───┬───┘    └───┬───┘          └───┬───┘                       │
-│     │            │                  │                           │
-│     └────────────┼──────────────────┘                           │
-│                  │                                              │
-│                  ▼                                              │
-│    Read Operations (Movie listings, Show availability)          │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-#### 3. Caching Strategy
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    MULTI-LAYER CACHING                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Layer 1: CloudFront Edge Cache                                 │
-│  ├── Movie listings: TTL 5 minutes                              │
-│  ├── Movie details: TTL 1 hour                                  │
-│  ├── Theatre info: TTL 24 hours                                 │
-│  └── Static assets: TTL 1 year                                  │
-│                                                                 │
-│  Layer 2: ElastiCache (Redis)                                   │
-│  ├── Seat availability per show: TTL 10 seconds                 │
-│  ├── Show listings by date: TTL 1 minute                        │
-│  ├── User session data: TTL 24 hours                            │
-│  └── Seat locks: TTL 5 minutes (business rule)                  │
-│                                                                 │
-│  Layer 3: Application Memory (Node.js LRU)                      │
-│  ├── Movie metadata: TTL 5 minutes                              │
-│  └── Configuration: TTL on change                               │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Cache Invalidation Pattern:**
-
-```typescript
-// Write-through with async invalidation
-async function confirmBooking(orderId: string) {
-  // 1. Update database (source of truth)
-  await db.orders.update({ orderId, status: 'CONFIRMED' });
-
-  // 2. Invalidate related caches asynchronously
-  await Promise.all([
-    redis.del(`seat_availability:${showId}`),
-    redis.del(`show_stats:${showId}`),
-    cloudfront.invalidate(`/api/v1/shows/${showId}/seatmap`),
-  ]);
-
-  // 3. Publish event for other services
-  await sqs.send('booking.confirmed', { orderId, showId, seats });
-}
-```
-
-#### 4. Event-Driven Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    EVENT FLOW ARCHITECTURE                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Booking Service                                                │
-│        │                                                        │
-│        │ booking.confirmed                                      │
-│        ▼                                                        │
-│   ┌─────────┐                                                   │
-│   │   SNS   │ ◄── Fan-out to multiple consumers                 │
-│   │  Topic  │                                                   │
-│   └────┬────┘                                                   │
-│        │                                                        │
-│   ┌────┼────────────────────────────┐                           │
-│   │    │                            │                           │
-│   ▼    ▼                            ▼                           │
-│ ┌────┐ ┌────┐                    ┌────┐                         │
-│ │SQS │ │SQS │                    │SQS │                         │
-│ │ Q1 │ │ Q2 │                    │ Q3 │                         │
-│ └─┬──┘ └─┬──┘                    └─┬──┘                         │
-│   │      │                         │                            │
-│   ▼      ▼                         ▼                            │
-│ ┌──────┐ ┌──────┐              ┌──────┐                         │
-│ │Email │ │ SMS  │              │Analytics                       │
-│ │Lambda│ │Lambda│              │ Firehose                       │
-│ └──────┘ └──────┘              └──────┘                         │
-│                                    │                            │
-│                                    ▼                            │
-│                               ┌─────────┐                       │
-│                               │Redshift │                       │
-│                               │   DW    │                       │
-│                               └─────────┘                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow
-
-#### Seat Selection Flow (Production)
-
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                     PRODUCTION SEAT LOCKING FLOW                            │
-├────────────────────────────────────────────────────────────────────────────┤
-│                                                                            │
-│  1. User clicks "Reserve Seats" with [A1, A2]                              │
-│     │                                                                      │
-│     ▼                                                                      │
-│  2. API Gateway → Lambda/ECS                                               │
-│     │                                                                      │
-│     ▼                                                                      │
-│  3. ┌─────────────────────────────────────────────────────────────────┐    │
-│     │ Redis Lua Script (Atomic)                                       │    │
-│     │ ┌─────────────────────────────────────────────────────────────┐ │    │
-│     │ │ MULTI                                                       │ │    │
-│     │ │   SETNX seat_lock:show_123:A1 user_456:hold_789 EX 300      │ │    │
-│     │ │   SETNX seat_lock:show_123:A2 user_456:hold_789 EX 300      │ │    │
-│     │ │ EXEC                                                        │ │    │
-│     │ └─────────────────────────────────────────────────────────────┘ │    │
-│     └─────────────────────────────────────────────────────────────────┘    │
-│     │                                                                      │
-│     ├── Success (both SETNX return 1)                                      │
-│     │   │                                                                  │
-│     │   ▼                                                                  │
-│     │   4. Write hold record to Aurora (async, best-effort)                │
-│     │   │                                                                  │
-│     │   ▼                                                                  │
-│     │   5. Return { holdId, expiresAt } to client                          │
-│     │                                                                      │
-│     └── Failure (any SETNX returns 0)                                      │
-│         │                                                                  │
-│         ▼                                                                  │
-│         6. Rollback: DEL any keys that were set                            │
-│         │                                                                  │
-│         ▼                                                                  │
-│         7. Return 409 Conflict with available seats                        │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Handling Flash Sales
-
-For high-demand events (e.g., blockbuster movie opening night):
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    FLASH SALE ARCHITECTURE                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Problem: 1M users trying to book 1000 seats in 10 seconds      │
-│                                                                 │
-│  Solution: Virtual Waiting Room + Token Bucket                  │
-│                                                                 │
-│  ┌────────────────────────────────────────────────────────┐     │
-│  │                   WAITING ROOM                         │     │
-│  │                                                        │     │
-│  │  1. User arrives → Assigned queue position             │     │
-│  │  2. WebSocket connection for real-time updates         │     │
-│  │  3. Token released at controlled rate (100/second)     │     │
-│  │  4. User with token can attempt booking                │     │
-│  │                                                        │     │
-│  └────────────────────────────────────────────────────────┘     │
-│                                                                 │
-│  Implementation:                                                │
-│                                                                 │
-│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐      │
-│  │CloudFront    │API GW   │    │ Lambda  │    │  Redis  │      │
-│  │+ WAF    │───▶│+ Limits │───▶│ Queue   │───▶│ Sorted  │      │
-│  │         │    │         │    │ Manager │    │  Set    │      │
-│  └─────────┘    └─────────┘    └─────────┘    └─────────┘      │
-│                                                                 │
-│  Rate Limits:                                                   │
-│  ├── CloudFront: 10,000 req/sec per IP                          │
-│  ├── WAF: Block suspicious patterns                             │
-│  ├── API Gateway: 1,000 req/sec per user                        │
-│  └── Application: Token bucket per show                         │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Cost Optimization
-
-| Component | Scaling Strategy | Estimated Cost (1B requests/month) |
-|-----------|-----------------|-----------------------------------|
-| CloudFront | Pay per request | ~$850 |
-| ALB | Capacity units | ~$500 |
-| ECS Fargate | Auto-scale 10-1000 | ~$3,000 |
-| Aurora | Serverless v2 | ~$2,000 |
-| ElastiCache | r6g.xlarge cluster | ~$1,500 |
-| SQS + SNS | Pay per message | ~$200 |
-| **Total** | | **~$8,050/month** |
-
-### Monitoring & Observability
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    OBSERVABILITY STACK                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐        │
-│  │  CloudWatch   │  │   X-Ray       │  │  OpenSearch   │        │
-│  │   Metrics     │  │   Tracing     │  │    Logs       │        │
-│  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘        │
-│          │                  │                  │                │
-│          └──────────────────┼──────────────────┘                │
-│                             │                                   │
-│                             ▼                                   │
-│                    ┌───────────────┐                            │
-│                    │   Grafana     │                            │
-│                    │  Dashboards   │                            │
-│                    └───────────────┘                            │
-│                                                                 │
-│  Key Metrics to Monitor:                                        │
-│  ├── Seat lock success rate (target: >99%)                      │
-│  ├── Lock acquisition latency (target: <50ms p99)               │
-│  ├── Booking conversion rate                                    │
-│  ├── Hold expiration rate                                       │
-│  ├── Redis cluster memory utilization                           │
-│  └── Database connection pool saturation                        │
-│                                                                 │
-│  Alerts:                                                        │
-│  ├── Lock failure rate > 5% → PagerDuty                         │
-│  ├── p99 latency > 500ms → Slack                                │
-│  └── Redis memory > 80% → Auto-scale trigger                    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+- [ ] Replace in-memory Map with Redis Cluster
+- [ ] Implement Lua scripts for atomic seat operations
+- [ ] Set up Aurora PostgreSQL with read replicas
+- [ ] Configure CloudFront for static + API caching
+- [ ] Implement virtual waiting room for flash sales
+- [ ] Set up CloudWatch monitoring and alerts
+- [ ] Load test with 10K+ concurrent users
+- [ ] Implement circuit breakers and fallbacks
 
 ---
 
 ## Summary
 
-### Current Implementation Limitations
+### Key Features Implemented
 
-| Limitation | Impact | Production Solution |
-|------------|--------|---------------------|
-| In-memory storage | Data loss on restart | Redis Cluster + Aurora |
-| Single server | No horizontal scaling | ECS + ALB |
-| No real TTL cleanup | Memory growth | Redis native TTL |
-| Race conditions possible | Double bookings | Redis Lua atomic scripts |
-| No monitoring | Blind operations | CloudWatch + X-Ray |
+| Feature | Implementation | Status |
+|---------|---------------|--------|
+| Seat Lock TTL | 10 minutes, checked on GET | ✅ Complete |
+| Expiration without DB writes | `getEffectiveHoldStatus()` | ✅ Complete |
+| Booking Queue | Partitioned by showId + tier | ✅ Complete |
+| Optimistic Locking | Version numbers per seat | ✅ Complete |
+| Multiple Holds per User | Each tab/session independent | ✅ Complete |
+| Hybrid Architecture | Lambda + Local API | ✅ Complete |
 
-### Production Checklist
+### Files Modified
 
-- [ ] Replace in-memory Map with Redis Cluster
-- [ ] Implement Lua scripts for atomic operations
-- [ ] Set up Aurora PostgreSQL with read replicas
-- [ ] Configure CloudFront for static + API caching
-- [ ] Implement virtual waiting room for flash sales
-- [ ] Set up monitoring dashboards and alerts
-- [ ] Load test with 100K concurrent users
-- [ ] Implement circuit breakers and fallbacks
-- [ ] Set up multi-region failover (optional)
+- `src/lib/memoryStore.ts` - Core booking logic
+- `src/components/SeatSelectorLambda.tsx` - Seat selection UI
+- `src/app/api/v1/shows/[showId]/seatmap/route.ts` - Combined seatmap
+- `src/app/api/v1/holds/route.ts` - Hold creation
+- `src/app/api/v1/orders/route.ts` - Order creation
+- `src/app/api/v1/orders/[orderId]/route.ts` - Order retrieval
+- `src/app/api/v1/orders/[orderId]/confirm-payment/route.ts` - Payment confirmation

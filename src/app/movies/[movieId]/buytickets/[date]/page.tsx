@@ -1,8 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { bmsAPI } from "@/lib/api-client";
 import type { Movie, AvailabilityResponse, ShowsResponse, Show, ShowStatus } from "@/lib/types";
 
@@ -22,8 +20,21 @@ function mapShowStatus(lambdaStatus: string): ShowStatus {
 
 async function getMovie(movieId: string): Promise<Movie | null> {
   try {
-    const movie = await bmsAPI.getMovieById(movieId);
-    return movie;
+    const response = await bmsAPI.getMovieById(movieId) as { title: string; language?: string; format?: string; age_rating?: string } | null;
+    if (!response) return null;
+    return {
+      movieId,
+      title: response.title,
+      about: "",
+      thumbnailUrl: "",
+      rating: 0,
+      durationMins: 0,
+      ageRating: response.age_rating || "PG-13",
+      releaseDate: "",
+      language: response.language || "English",
+      format: response.format || "2D",
+      genres: [],
+    };
   } catch (error) {
     console.error('Error fetching movie:', error);
     return null;
@@ -46,21 +57,39 @@ async function getAvailability(movieId: string): Promise<AvailabilityResponse> {
   };
 }
 
+interface LambdaShowsResponse {
+  movieId: string;
+  date: string;
+  theatres: Array<{
+    theatreId: string;
+    name: string;
+    address: string;
+    geo?: { lat: number; lng: number };
+    cancellationAvailable: boolean;
+    shows: Array<{
+      showId: string;
+      startTime: string;
+      price: number;
+      status: string;
+    }>;
+  }>;
+}
+
 async function getShows(movieId: string, date: string): Promise<ShowsResponse> {
   try {
-    const response = await bmsAPI.getMovieShows(movieId, date);
-    
+    const response = await bmsAPI.getMovieShows(movieId, date) as LambdaShowsResponse;
+
     // Transform the response to match frontend expectations
     const transformedResponse: ShowsResponse = {
       movieId: response.movieId,
       date: response.date,
-      theatres: response.theatres.map((theatre: any) => ({
+      theatres: response.theatres.map((theatre) => ({
         theatreId: theatre.theatreId,
         name: theatre.name,
         address: theatre.address,
-        geo: theatre.geo,
+        geo: theatre.geo ?? { lat: 0, lng: 0 },
         cancellationAvailable: theatre.cancellationAvailable,
-        shows: theatre.shows.map((show: any) => ({
+        shows: theatre.shows.map((show) => ({
           showId: show.showId,
           movieId: movieId,
           theatreId: theatre.theatreId,
@@ -70,7 +99,7 @@ async function getShows(movieId: string, date: string): Promise<ShowsResponse> {
         }))
       }))
     };
-    
+
     return transformedResponse;
   } catch (error) {
     console.error('Error fetching shows:', error);
@@ -102,11 +131,11 @@ function formatShowTime(startTime: string): string {
 function getStatusBadge(status: Show["status"]) {
   switch (status) {
     case "AVAILABLE":
-      return <Badge variant="success" className="text-xs">Available</Badge>;
+      return <span className="text-xs text-green-600 font-medium">Available</span>;
     case "FILLING_FAST":
-      return <Badge variant="warning" className="text-xs">Filling Fast</Badge>;
+      return <span className="text-xs text-orange-500 font-medium">Filling Fast</span>;
     case "ALMOST_FULL":
-      return <Badge variant="destructive" className="text-xs">Almost Full</Badge>;
+      return <span className="text-xs text-red-500 font-medium">Almost Full</span>;
   }
 }
 
@@ -136,102 +165,107 @@ export default async function BuyTicketsPage({
   }
 
   return (
-    <div className="container mx-auto px-4 py-6">
-      {/* Movie Title */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold">{movie.title}</h1>
-        <p className="text-sm text-muted-foreground">
-          {movie.language} | {movie.format} | {movie.ageRating}
-        </p>
+    <div className="min-h-screen bg-[#f5f5f5]">
+      {/* Header */}
+      <div className="bg-white border-b shadow-sm">
+        <div className="container mx-auto px-4 py-4">
+          <h1 className="text-xl font-bold text-[#1a1a2e]">{movie.title}</h1>
+          <p className="text-sm text-gray-500">
+            {movie.language} | {movie.format} | {movie.ageRating}
+          </p>
+        </div>
       </div>
 
       {/* Date Selector */}
-      <div className="mb-8">
-        <div className="flex gap-2 overflow-x-auto pb-2">
-          {allDates.map((d) => {
-            const formatted = formatDate(d);
-            const isAvailable = availability.availableDates.includes(d);
-            const isSelected = d === date;
+      <div className="bg-white border-b">
+        <div className="container mx-auto px-4 py-4">
+          <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
+            {allDates.map((d) => {
+              const formatted = formatDate(d);
+              const isAvailable = availability.availableDates.includes(d);
+              const isSelected = d === date;
 
-            return (
-              <Link
-                key={d}
-                href={isAvailable ? `/movies/${movieId}/buytickets/${d}` : "#"}
-                className={`shrink-0 ${!isAvailable ? "pointer-events-none" : ""}`}
-              >
-                <div
-                  className={`flex w-16 flex-col items-center rounded-lg border p-2 transition-colors ${
-                    isSelected
-                      ? "border-rose-600 bg-rose-600 text-white"
-                      : isAvailable
-                        ? "border-border hover:border-rose-600"
-                        : "border-border bg-muted text-muted-foreground opacity-50"
-                  }`}
+              return (
+                <Link
+                  key={d}
+                  href={isAvailable ? `/movies/${movieId}/buytickets/${d}` : "#"}
+                  className={`shrink-0 ${!isAvailable ? "pointer-events-none" : ""}`}
                 >
-                  <span className="text-xs font-medium">{formatted.day}</span>
-                  <span className="text-lg font-bold">{formatted.date}</span>
-                  <span className="text-xs">{formatted.month}</span>
-                </div>
-              </Link>
-            );
-          })}
+                  <div
+                    className={`flex w-16 flex-col items-center rounded-lg p-2 transition-all ${
+                      isSelected
+                        ? "bg-[#dc3558] text-white shadow-md"
+                        : isAvailable
+                          ? "bg-white border border-gray-200 hover:border-[#dc3558] hover:text-[#dc3558]"
+                          : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                    }`}
+                  >
+                    <span className="text-xs font-medium uppercase">{formatted.day}</span>
+                    <span className="text-xl font-bold">{formatted.date}</span>
+                    <span className="text-xs uppercase">{formatted.month}</span>
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
         </div>
       </div>
 
       {/* Theatre Listings */}
-      <div className="space-y-4">
-        {shows.theatres.length === 0 ? (
-          <Card>
-            <CardContent className="py-8 text-center">
-              <p className="text-muted-foreground">No shows available for this date.</p>
-            </CardContent>
-          </Card>
-        ) : (
-          shows.theatres.map((theatre) => (
-            <Card key={theatre.theatreId}>
-              <CardHeader className="pb-3">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <CardTitle className="text-lg">{theatre.name}</CardTitle>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {theatre.address}
-                    </p>
+      <div className="container mx-auto px-4 py-6">
+        <div className="space-y-4">
+          {shows.theatres.length === 0 ? (
+            <div className="bg-white rounded-lg shadow-sm p-8 text-center">
+              <svg className="mx-auto h-12 w-12 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <p className="text-gray-500">No shows available for this date.</p>
+            </div>
+          ) : (
+            shows.theatres.map((theatre) => (
+              <div key={theatre.theatreId} className="bg-white rounded-lg shadow-sm overflow-hidden">
+                <div className="p-4 border-b">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="font-semibold text-[#1a1a2e]">{theatre.name}</h3>
+                      <p className="text-sm text-gray-500 mt-1">{theatre.address}</p>
+                    </div>
+                    {theatre.cancellationAvailable && (
+                      <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-1 rounded">
+                        Cancellation Available
+                      </span>
+                    )}
                   </div>
-                  {theatre.cancellationAvailable && (
-                    <Badge variant="outline" className="shrink-0 text-green-600">
-                      Cancellation Available
-                    </Badge>
-                  )}
                 </div>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-wrap gap-3">
-                  {theatre.shows.map((show) => (
-                    <Link
-                      key={show.showId}
-                      href={`/seat-layout/${movieId}/${theatre.theatreId}/${show.showId}/${date}`}
-                    >
-                      <Button
-                        variant="outline"
-                        className="group relative h-auto flex-col items-start gap-1 py-2"
+                <div className="p-4">
+                  <div className="flex flex-wrap gap-3">
+                    {theatre.shows.map((show) => (
+                      <Link
+                        key={show.showId}
+                        href={`/seat-layout/${movieId}/${theatre.theatreId}/${show.showId}/${date}`}
                       >
-                        <span className="font-semibold text-green-600 group-hover:text-green-700">
-                          {formatShowTime(show.startTime)}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          Rs. {show.price}
-                        </span>
-                        <div className="mt-1">
-                          {getStatusBadge(show.status)}
-                        </div>
-                      </Button>
-                    </Link>
-                  ))}
+                        <Button
+                          variant="outline"
+                          className="h-auto py-3 px-4 border-green-500 hover:bg-green-50 flex flex-col items-center min-w-[90px]"
+                        >
+                          <span className="font-semibold text-green-600">
+                            {formatShowTime(show.startTime)}
+                          </span>
+                          <span className="text-xs text-gray-500 mt-1">
+                            Rs. {show.price}
+                          </span>
+                          <div className="mt-1">
+                            {getStatusBadge(show.status)}
+                          </div>
+                        </Button>
+                      </Link>
+                    ))}
+                  </div>
                 </div>
-              </CardContent>
-            </Card>
-          ))
-        )}
+              </div>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { getShowById, seatLayout, getTheatreById } from "@/lib/mockData";
-import { getUnavailableSeatIdsForShow, getHeldSeatIdsForShow } from "@/lib/memoryStore";
-import type { SeatMap } from "@/lib/types";
+import { getHeldSeatIdsForShow, getConfirmedSeatIdsForShow } from "@/lib/memoryStore";
+import { bmsAPI, type SeatmapResponse } from "@/lib/api-client";
 
 export async function GET(
   _request: Request,
@@ -10,33 +9,33 @@ export async function GET(
   try {
     const { showId } = await params;
 
-    const show = getShowById(showId);
-    if (!show) {
-      return NextResponse.json(
-        { error: { message: "Show not found" } },
-        { status: 404 }
-      );
-    }
+    // Fetch base seatmap from Lambda API
+    const lambdaSeatmap = await bmsAPI.getSeatmap(showId) as SeatmapResponse;
 
-    const theatre = getTheatreById(show.theatreId);
-    if (!theatre) {
-      return NextResponse.json(
-        { error: { message: "Theatre not found" } },
-        { status: 404 }
-      );
-    }
+    // Get locally held and confirmed seats
+    const localHeldSeats = getHeldSeatIdsForShow(showId);
+    const localConfirmedSeats = getConfirmedSeatIdsForShow(showId);
 
-    const unavailableSeatIds = getUnavailableSeatIdsForShow(showId);
-    const heldSeatIds = getHeldSeatIdsForShow(showId);
+    // Merge Lambda unavailable seats with local holds/confirmed seats
+    const allUnavailable = [
+      ...new Set([
+        ...lambdaSeatmap.unavailableSeatIds,
+        ...localConfirmedSeats,
+      ])
+    ];
 
-    const response: SeatMap = {
-      showId,
-      theatreId: show.theatreId,
-      screenName: "Screen 1",
-      price: show.price,
-      layout: seatLayout,
-      unavailableSeatIds,
-      heldSeatIds,
+    const allHeld = [
+      ...new Set([
+        ...lambdaSeatmap.heldSeatIds,
+        ...localHeldSeats,
+      ])
+    ];
+
+    // Return combined seatmap
+    const response = {
+      ...lambdaSeatmap,
+      unavailableSeatIds: allUnavailable,
+      heldSeatIds: allHeld,
     };
 
     return NextResponse.json(response);
