@@ -180,6 +180,18 @@ export function SeatSelectorLambda({
     );
   }
 
+  // Check if seatMap has valid layout array
+  if (!seatMap.layout || !Array.isArray(seatMap.layout)) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="text-center">
+          <p className="text-red-600 mb-4">Invalid seat map data received</p>
+          <Button onClick={loadSeatMap}>Retry</Button>
+        </div>
+      </div>
+    );
+  }
+
   // Group seats by row
   const seatsByRow = seatMap.layout.reduce((acc, seat) => {
     if (!acc[seat.row]) acc[seat.row] = [];

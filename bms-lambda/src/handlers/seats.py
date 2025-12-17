@@ -87,78 +87,23 @@ def get_seatmap(show_id: str) -> Dict[str, Any]:
         logger.error("Failed to get seatmap", error=e, extra={'show_id': show_id})
         return create_error_response(500, "Failed to fetch seat map")
 
-def get_seat_layout_for_theatre(theatre_id: str) -> Dict[str, Any]:
+def get_seat_layout_for_theatre(theatre_id: str) -> List[Dict[str, Any]]:
     """Get seat layout for a theatre (mock implementation)"""
     # In production, this would come from a theatre configuration table
-    return {
-        "rows": [
-            {
-                "rowId": "A",
-                "seats": [
-                    {"seatId": "A1", "type": "regular"},
-                    {"seatId": "A2", "type": "regular"},
-                    {"seatId": "A3", "type": "regular"},
-                    {"seatId": "A4", "type": "regular"},
-                    {"seatId": "A5", "type": "regular"},
-                    {"seatId": "A6", "type": "regular"},
-                    {"seatId": "A7", "type": "regular"},
-                    {"seatId": "A8", "type": "regular"},
-                    {"seatId": "A9", "type": "regular"},
-                    {"seatId": "A10", "type": "regular"}
-                ]
-            },
-            {
-                "rowId": "B",
-                "seats": [
-                    {"seatId": "B1", "type": "regular"},
-                    {"seatId": "B2", "type": "regular"},
-                    {"seatId": "B3", "type": "regular"},
-                    {"seatId": "B4", "type": "regular"},
-                    {"seatId": "B5", "type": "regular"},
-                    {"seatId": "B6", "type": "regular"},
-                    {"seatId": "B7", "type": "regular"},
-                    {"seatId": "B8", "type": "regular"},
-                    {"seatId": "B9", "type": "regular"},
-                    {"seatId": "B10", "type": "regular"}
-                ]
-            },
-            {
-                "rowId": "C",
-                "seats": [
-                    {"seatId": "C1", "type": "premium"},
-                    {"seatId": "C2", "type": "premium"},
-                    {"seatId": "C3", "type": "premium"},
-                    {"seatId": "C4", "type": "premium"},
-                    {"seatId": "C5", "type": "premium"},
-                    {"seatId": "C6", "type": "premium"},
-                    {"seatId": "C7", "type": "premium"},
-                    {"seatId": "C8", "type": "premium"},
-                    {"seatId": "C9", "type": "premium"},
-                    {"seatId": "C10", "type": "premium"}
-                ]
-            },
-            {
-                "rowId": "D",
-                "seats": [
-                    {"seatId": "D1", "type": "premium"},
-                    {"seatId": "D2", "type": "premium"},
-                    {"seatId": "D3", "type": "premium"},
-                    {"seatId": "D4", "type": "premium"},
-                    {"seatId": "D5", "type": "premium"},
-                    {"seatId": "D6", "type": "premium"},
-                    {"seatId": "D7", "type": "premium"},
-                    {"seatId": "D8", "type": "premium"},
-                    {"seatId": "D9", "type": "premium"},
-                    {"seatId": "D10", "type": "premium"}
-                ]
-            }
-        ],
-        "totalSeats": 40,
-        "priceMap": {
-            "regular": 150.0,
-            "premium": 250.0
-        }
-    }
+    # Return flat array of seat objects as expected by frontend
+    seats = []
+    
+    # Generate seats for rows A-J with 10 seats each
+    for row_letter in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']:
+        for seat_num in range(1, 11):
+            seats.append({
+                "seatId": f"{row_letter}{seat_num}",
+                "row": row_letter,
+                "number": seat_num,
+                "type": "regular"
+            })
+    
+    return seats
 
 def get_permanently_unavailable_seats(show_id: str) -> List[str]:
     """Get permanently unavailable seats (broken, maintenance, etc.)"""

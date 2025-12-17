@@ -10,6 +10,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+def json_serializer(obj):
+    """Custom JSON serializer for objects not serializable by default json code"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 class BMSLogger:
     """Custom logger for BMS Lambda functions with structured logging"""
     
@@ -25,8 +31,8 @@ class BMSLogger:
         }
         if extra:
             log_data.update(extra)
-        self.logger.info(json.dumps(log_data))
-    
+        self.logger.info(json.dumps(log_data, default=json_serializer))
+
     def error(self, message: str, error: Exception = None, extra: Dict[str, Any] = None):
         """Log error message with exception details"""
         log_data = {
@@ -42,8 +48,8 @@ class BMSLogger:
             })
         if extra:
             log_data.update(extra)
-        self.logger.error(json.dumps(log_data))
-    
+        self.logger.error(json.dumps(log_data, default=json_serializer))
+
     def warning(self, message: str, extra: Dict[str, Any] = None):
         """Log warning message"""
         log_data = {
@@ -53,4 +59,4 @@ class BMSLogger:
         }
         if extra:
             log_data.update(extra)
-        self.logger.warning(json.dumps(log_data))
+        self.logger.warning(json.dumps(log_data, default=json_serializer))

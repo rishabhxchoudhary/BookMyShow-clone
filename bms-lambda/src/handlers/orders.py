@@ -106,11 +106,8 @@ def create_order(body: str, user_id: str) -> Dict[str, Any]:
         
         order_data = {
             'order_id': order_id,
-            'hold_id': hold_id,
             'user_id': user_id,
             'show_id': show_id,
-            'movie_id': show['movie_id'],
-            'theatre_id': show['theatre_id'],
             'seat_ids': hold_data['seat_ids'],
             'customer_name': customer['name'],
             'customer_email': customer['email'],
