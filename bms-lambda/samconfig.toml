@@ -1,0 +1,24 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "bms-lambda"
+s3_bucket = "bms-lambda-deployment-1765969818"
+s3_prefix = "bms-lambda"
+region = "ap-south-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+disable_rollback = false
+parameter_overrides = [
+  "DatabaseHost=localhost",
+  "DatabasePort=5432", 
+  "DatabaseName=bms_production",
+  "DatabaseUser=bms_user",
+  "DatabasePassword=temp-password",
+  "RedisHost=localhost",
+  "RedisPort=6379"
+]
+
+[default.build.parameters]
+use_container = true

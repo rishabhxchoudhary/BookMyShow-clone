@@ -4,20 +4,35 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { bmsAPI, type MovieDetailsResponse } from "@/lib/api-client";
 import type { Movie } from "@/lib/types";
 
 async function getMovie(movieId: string): Promise<Movie | null> {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-  const res = await fetch(`${baseUrl}/api/v1/movies/${movieId}`, {
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    if (res.status === 404) return null;
-    throw new Error("Failed to fetch movie");
+  try {
+    const response = await bmsAPI.getMovieById(movieId) as MovieDetailsResponse;
+    
+    // Transform Lambda API response to match frontend types
+    const movie: Movie = {
+      movieId: response.movie_id,
+      title: response.title,
+      about: response.about,
+      thumbnailUrl: response.thumbnail_url || "https://images.unsplash.com/photo-1626814026160-2237a95fc5a0?w=400&h=600&fit=crop",
+      rating: parseFloat(response.rating || "0"),
+      durationMins: response.duration_mins,
+      ageRating: response.age_rating || "PG-13",
+      releaseDate: response.release_date,
+      language: response.language,
+      format: response.format,
+      genres: response.genres || [],
+      cast: [], // Lambda API doesn't provide cast data yet
+      crew: [], // Lambda API doesn't provide crew data yet
+    };
+    
+    return movie;
+  } catch (error) {
+    console.error('Failed to fetch movie from Lambda API:', error);
+    return null;
   }
-
-  return res.json();
 }
 
 function formatDuration(mins: number): string {
@@ -104,56 +119,60 @@ export default async function MovieDetailPage({
         </section>
 
         {/* Cast Section */}
-        <section className="mb-8">
-          <h2 className="mb-4 text-xl font-bold">Cast</h2>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {movie.cast.map((member) => (
-              <Card key={member.name} className="overflow-hidden">
-                <div className="relative aspect-square">
-                  <Image
-                    src={member.imageUrl}
-                    alt={member.name}
-                    fill
-                    className="object-cover"
-                  />
-                </div>
-                <CardContent className="p-3">
-                  <p className="line-clamp-1 text-sm font-medium">{member.name}</p>
-                  {member.role && (
-                    <p className="line-clamp-1 text-xs text-muted-foreground">
-                      as {member.role}
-                    </p>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </section>
+        {movie.cast && movie.cast.length > 0 && (
+          <section className="mb-8">
+            <h2 className="mb-4 text-xl font-bold">Cast</h2>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+              {movie.cast.map((member) => (
+                <Card key={member.name} className="overflow-hidden">
+                  <div className="relative aspect-square">
+                    <Image
+                      src={member.imageUrl}
+                      alt={member.name}
+                      fill
+                      className="object-cover"
+                    />
+                  </div>
+                  <CardContent className="p-3">
+                    <p className="line-clamp-1 text-sm font-medium">{member.name}</p>
+                    {member.role && (
+                      <p className="line-clamp-1 text-xs text-muted-foreground">
+                        as {member.role}
+                      </p>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Crew Section */}
-        <section>
-          <h2 className="mb-4 text-xl font-bold">Crew</h2>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {movie.crew.map((member) => (
-              <Card key={member.name} className="overflow-hidden">
-                <div className="relative aspect-square">
-                  <Image
-                    src={member.imageUrl}
-                    alt={member.name}
-                    fill
-                    className="object-cover"
-                  />
-                </div>
-                <CardContent className="p-3">
-                  <p className="line-clamp-1 text-sm font-medium">{member.name}</p>
-                  <p className="line-clamp-1 text-xs text-muted-foreground">
-                    {member.role}
-                  </p>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </section>
+        {movie.crew && movie.crew.length > 0 && (
+          <section>
+            <h2 className="mb-4 text-xl font-bold">Crew</h2>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+              {movie.crew.map((member) => (
+                <Card key={member.name} className="overflow-hidden">
+                  <div className="relative aspect-square">
+                    <Image
+                      src={member.imageUrl}
+                      alt={member.name}
+                      fill
+                      className="object-cover"
+                    />
+                  </div>
+                  <CardContent className="p-3">
+                    <p className="line-clamp-1 text-sm font-medium">{member.name}</p>
+                    <p className="line-clamp-1 text-xs text-muted-foreground">
+                      {member.role}
+                    </p>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

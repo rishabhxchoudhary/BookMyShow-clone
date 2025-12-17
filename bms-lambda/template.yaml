@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  BMS Lambda Functions - BookMyShow Clone Backend Services
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.11
+    MemorySize: 512
+    Environment:
+      Variables:
+        # Database Configuration
+        DATABASE_HOST: !Ref DatabaseHost
+        DATABASE_PORT: !Ref DatabasePort
+        DATABASE_NAME: !Ref DatabaseName
+        DATABASE_USER: !Ref DatabaseUser
+        DATABASE_PASSWORD: !Ref DatabasePassword
+        DATABASE_SSL: "true"
+        
+        # Redis Configuration
+        REDIS_HOST: !Ref RedisHost
+        REDIS_PORT: !Ref RedisPort
+        REDIS_TLS: "true"
+        
+        # SQS Configuration  
+        SQS_QUEUE_URL: "https://sqs.ap-south-1.amazonaws.com/703671918077/bms-events-queue"
+        
+        # Application Configuration
+        HOLD_TTL_SECONDS: "300"
+        ORDER_TTL_SECONDS: "300"
+        MAX_SEATS_PER_BOOKING: "10"
+
+Parameters:
+  # Database Parameters
+  DatabaseHost:
+    Type: String
+    Description: RDS PostgreSQL endpoint
+    Default: "your-rds-endpoint.amazonaws.com"
+  
+  DatabasePort:
+    Type: String
+    Description: Database port
+    Default: "5432"
+    
+  DatabaseName:
+    Type: String
+    Description: Database name
+    Default: "bms_production"
+    
+  DatabaseUser:
+    Type: String
+    Description: Database username
+    Default: "bms_user"
+    
+  DatabasePassword:
+    Type: String
+    Description: Database password
+    NoEcho: true
+    Default: "your-secure-password"
+  
+  # Redis Parameters
+  RedisHost:
+    Type: String
+    Description: ElastiCache Redis endpoint
+    Default: "your-elasticache-endpoint.amazonaws.com"
+    
+  RedisPort:
+    Type: String
+    Description: Redis port
+    Default: "6379"
+
+Resources:
+  # API Gateway
+  BMSApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-user-id'"
+        AllowOrigin: "'*'"
+
+  # SQS Queue for Events (reference to existing queue)
+  # Note: Using existing SQS queue created separately
+
+  # Lambda Functions
+  
+  # Movies Service - Handle read operations
+  MoviesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bms-movies-service
+      CodeUri: src/
+      Handler: handlers.movies.lambda_handler
+      Environment:
+        Variables:
+          REDIS_URL: redis://default:bY6nYQasYLWeBJvSUjs6VmfYxYHROp1u@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+          DATABASE_URL: postgresql://postgres:2kTqQ7Mcl054kELxa955@bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com:5432/bms
+          SQS_QUEUE_URL: https://sqs.ap-south-1.amazonaws.com/905418273616/bms-events-queue
+          LOG_LEVEL: INFO
+          HOLD_TTL_SECONDS: 300
+      Policies:
+        - VPCAccessPolicy: {}
+        - Statement:
+          - Effect: Allow
+            Action:
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusters
+            Resource: "*"
+      Events:
+        GetMovies:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /movies
+            Method: GET
+        GetMovieDetails:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /movies/{movieId}
+            Method: GET
+        GetMovieShows:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /movies/{movieId}/shows
+            Method: GET
+
+  # Seats Service - Handle seat locking and availability
+  SeatsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bms-seats-service
+      CodeUri: src/
+      Handler: handlers.seats.lambda_handler
+      Environment:
+        Variables:
+          REDIS_URL: redis://default:bY6nYQasYLWeBJvSUjs6VmfYxYHROp1u@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+          DATABASE_URL: postgresql://postgres:2kTqQ7Mcl054kELxa955@bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com:5432/bms
+          SQS_QUEUE_URL: https://sqs.ap-south-1.amazonaws.com/905418273616/bms-events-queue
+          LOG_LEVEL: INFO
+          HOLD_TTL_SECONDS: 300
+      Policies:
+        - VPCAccessPolicy: {}
+        - Statement:
+          - Effect: Allow
+            Action:
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusters
+            Resource: "*"
+      Events:
+        GetSeatMap:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /shows/{showId}/seatmap
+            Method: GET
+        CreateHold:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /holds
+            Method: POST
+        GetHold:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /holds/{holdId}
+            Method: GET
+        UpdateHold:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /holds/{holdId}
+            Method: PUT
+        ReleaseHold:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /holds/{holdId}
+            Method: DELETE
+
+  # Orders Service - Handle order creation and payment
+  OrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bms-orders-service
+      CodeUri: src/
+      Handler: handlers.orders.lambda_handler
+      Environment:
+        Variables:
+          REDIS_URL: redis://default:bY6nYQasYLWeBJvSUjs6VmfYxYHROp1u@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+          DATABASE_URL: postgresql://postgres:2kTqQ7Mcl054kELxa955@bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com:5432/bms
+          SQS_QUEUE_URL: https://sqs.ap-south-1.amazonaws.com/905418273616/bms-events-queue
+          LOG_LEVEL: INFO
+          HOLD_TTL_SECONDS: 300
+      Policies:
+        - VPCAccessPolicy: {}
+        - SQSSendMessagePolicy:
+            QueueName: bms-events-queue
+        - Statement:
+          - Effect: Allow
+            Action:
+              - rds:DescribeDBInstances
+              - rds:DescribeDBClusters
+            Resource: "*"
+      Events:
+        CreateOrder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /orders
+            Method: POST
+        GetOrder:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /orders/{orderId}
+            Method: GET
+        ConfirmPayment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /orders/{orderId}/confirm-payment
+            Method: POST
+
+  # Events Processor - Handle SQS events
+  EventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bms-events-processor
+      CodeUri: src/
+      Handler: handlers.events.lambda_handler
+      Environment:
+        Variables:
+          REDIS_URL: redis://default:bY6nYQasYLWeBJvSUjs6VmfYxYHROp1u@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+          DATABASE_URL: postgresql://postgres:2kTqQ7Mcl054kELxa955@bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com:5432/bms
+          SQS_QUEUE_URL: https://sqs.ap-south-1.amazonaws.com/905418273616/bms-events-queue
+          LOG_LEVEL: INFO
+          HOLD_TTL_SECONDS: 300
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: bms-events-queue
+
+  ShowsGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: bms-shows-generator
+      CodeUri: src/
+      Handler: handlers.shows_generator.lambda_handler
+      Timeout: 300  # 5 minutes for data generation
+      MemorySize: 1024  # More memory for bulk operations
+      Environment:
+        Variables:
+          REDIS_URL: redis://default:bY6nYQasYLWeBJvSUjs6VmfYxYHROp1u@redis-15866.crce182.ap-south-1-1.ec2.cloud.redislabs.com:15866
+          DATABASE_URL: postgresql://postgres:2kTqQ7Mcl054kELxa955@bookmyshow.cxwyaqu60aes.ap-south-1.rds.amazonaws.com:5432/bms
+          LOG_LEVEL: INFO
+      Events:
+        ShowsGeneratorApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BMSApi
+            Path: /admin/generate-shows
+            Method: POST
+
+  # Lambda execution role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: BMSLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: 
+                  - "arn:aws:sqs:ap-south-1:703671918077:bms-events-queue"
+                  - "arn:aws:sqs:ap-south-1:703671918077:bms-notifications-queue"
+
+Outputs:
+  BMSApiEndpoint:
+    Description: "API Gateway endpoint URL for BMS services"
+    Value: !Sub "https://${BMSApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+    Export:
+      Name: BMSApiEndpoint
+      
+  BMSEventsQueueURL:
+    Description: "SQS Queue URL for events"
+    Value: "https://sqs.ap-south-1.amazonaws.com/703671918077/bms-events-queue"
+    Export:
+      Name: BMSEventsQueueURL

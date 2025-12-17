@@ -1,0 +1,23 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "bms-lambda-stack"
+s3_bucket = "your-sam-deployment-bucket"
+s3_prefix = "bms-lambda"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = [
+  "DatabaseHost=your-rds-endpoint.amazonaws.com",
+  "DatabasePort=5432",
+  "DatabaseName=bms_production",
+  "DatabaseUser=bms_user",
+  "DatabasePassword=your-secure-password",
+  "RedisHost=your-elasticache-endpoint.amazonaws.com",
+  "RedisPort=6379"
+]
+
+[default.build.parameters]
+use_container = true

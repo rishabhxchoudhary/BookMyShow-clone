@@ -24,8 +24,8 @@ export interface Movie {
   language: string;
   format: string;
   genres: string[];
-  cast: CastMember[];
-  crew: CrewMember[];
+  cast?: CastMember[];
+  crew?: CrewMember[];
 }
 
 export interface MovieCard {

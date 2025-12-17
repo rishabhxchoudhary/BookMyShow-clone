@@ -3,40 +3,79 @@ import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { Movie, AvailabilityResponse, ShowsResponse, Show } from "@/lib/types";
+import { bmsAPI } from "@/lib/api-client";
+import type { Movie, AvailabilityResponse, ShowsResponse, Show, ShowStatus } from "@/lib/types";
+
+// Map Lambda API status to frontend ShowStatus
+function mapShowStatus(lambdaStatus: string): ShowStatus {
+  switch (lambdaStatus.toLowerCase()) {
+    case 'active':
+      return 'AVAILABLE';
+    case 'filling_fast':
+      return 'FILLING_FAST';
+    case 'almost_full':
+      return 'ALMOST_FULL';
+    default:
+      return 'AVAILABLE';
+  }
+}
 
 async function getMovie(movieId: string): Promise<Movie | null> {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-  const res = await fetch(`${baseUrl}/api/v1/movies/${movieId}`, {
-    cache: "no-store",
-  });
-  if (!res.ok) return null;
-  return res.json();
+  try {
+    const movie = await bmsAPI.getMovieById(movieId);
+    return movie;
+  } catch (error) {
+    console.error('Error fetching movie:', error);
+    return null;
+  }
 }
 
 async function getAvailability(movieId: string): Promise<AvailabilityResponse> {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  // Generate the next 7 days as available dates for now
+  // TODO: Implement proper availability API in Lambda backend
+  const availableDates: string[] = [];
   const today = new Date();
-  const from = today.toISOString().split("T")[0];
-  const to = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-
-  const res = await fetch(
-    `${baseUrl}/api/v1/movies/${movieId}/availability?from=${from}&to=${to}`,
-    { cache: "no-store" }
-  );
-
-  if (!res.ok) throw new Error("Failed to fetch availability");
-  return res.json();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(today.getTime() + i * 24 * 60 * 60 * 1000);
+    availableDates.push(d.toISOString().split("T")[0]!);
+  }
+  
+  return {
+    movieId,
+    availableDates
+  };
 }
 
 async function getShows(movieId: string, date: string): Promise<ShowsResponse> {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-  const res = await fetch(`${baseUrl}/api/v1/movies/${movieId}/shows?date=${date}`, {
-    cache: "no-store",
-  });
-
-  if (!res.ok) throw new Error("Failed to fetch shows");
-  return res.json();
+  try {
+    const response = await bmsAPI.getMovieShows(movieId, date);
+    
+    // Transform the response to match frontend expectations
+    const transformedResponse: ShowsResponse = {
+      movieId: response.movieId,
+      date: response.date,
+      theatres: response.theatres.map((theatre: any) => ({
+        theatreId: theatre.theatreId,
+        name: theatre.name,
+        address: theatre.address,
+        geo: theatre.geo,
+        cancellationAvailable: theatre.cancellationAvailable,
+        shows: theatre.shows.map((show: any) => ({
+          showId: show.showId,
+          movieId: movieId,
+          theatreId: theatre.theatreId,
+          startTime: show.startTime,
+          price: show.price,
+          status: mapShowStatus(show.status)
+        }))
+      }))
+    };
+    
+    return transformedResponse;
+  } catch (error) {
+    console.error('Error fetching shows:', error);
+    throw new Error("Failed to fetch shows");
+  }
 }
 
 function formatDate(dateStr: string): { day: string; date: string; month: string } {

@@ -1,0 +1,1 @@
+{"statusCode": 200, "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}, "body": "{\"success\": true, \"message\": \"Generated 232 shows for 7 days\", \"stats\": {\"total_shows\": 232, \"shows_per_day\": 33, \"movies_covered\": 5, \"theatres_covered\": 4, \"days_generated\": 7}}"}
