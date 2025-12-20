@@ -119,12 +119,12 @@ class DatabaseService:
         FROM shows s
         JOIN theatres t ON s.theatre_id = t.theatre_id
         WHERE s.movie_id = %s 
-          AND DATE(s.start_time) = %s 
+          AND s.start_time >= %s::date 
+          AND s.start_time < (%s::date + INTERVAL '1 day')
           AND s.status != 'CANCELLED'
         ORDER BY t.name, s.start_time
         """
-        return self.execute_query(query, (movie_id, date))
-    
+        return self.execute_query(query, (movie_id, date, date))
     def get_show_by_id(self, show_id: str) -> Optional[Dict[str, Any]]:
         """Get show details by ID"""
         query = """
