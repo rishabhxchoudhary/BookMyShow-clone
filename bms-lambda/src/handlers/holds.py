@@ -69,10 +69,6 @@ def create_hold(body: str, user_id: str) -> Dict[str, Any]:
         seat_ids = request_data['seatIds']
         quantity = request_data['quantity']
         
-        # Validate seat count matches quantity
-        if len(seat_ids) != quantity:
-            return create_error_response(400, "Number of seats must match quantity")
-        
         # Validate show exists
         show = db_service.get_show_by_id(show_id)
         if not show:
