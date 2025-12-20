@@ -127,29 +127,15 @@ class DatabaseService:
     
     def get_show_by_id(self, show_id: str) -> Optional[Dict[str, Any]]:
         """Get show details by ID"""
-        try:
-            query = """
-            SELECT s.*, t.name as theatre_name, m.title as movie_title
-            FROM shows s
-            JOIN theatres t ON s.theatre_id = t.theatre_id
-            JOIN movies m ON s.movie_id = m.movie_id
-            WHERE s.show_id = %s
-            """
-            results = self.execute_query(query, (show_id,))
-            return results[0] if results else None
-        except Exception as e:
-            # For development, return mock data if database fails
-            logger.warning(f"Database query failed, returning mock show data: {e}")
-            return {
-                'show_id': show_id,
-                'movie_id': 'f84da68e-ba18-4924-ad7d-92ca14fb66eb',
-                'theatre_id': 'theatre-123',
-                'start_time': datetime.now(timezone.utc),
-                'price': 250.0,
-                'status': 'ACTIVE',
-                'theatre_name': 'PVR Cinemas',
-                'movie_title': 'RRR'
-            }
+        query = """
+        SELECT s.*, t.name as theatre_name, m.title as movie_title
+        FROM shows s
+        JOIN theatres t ON s.theatre_id = t.theatre_id
+        JOIN movies m ON s.movie_id = m.movie_id
+        WHERE s.show_id = %s
+        """
+        results = self.execute_query(query, (show_id,))
+        return results[0] if results else None
     
     # Orders operations
     def get_confirmed_seats_for_show(self, show_id: str) -> List[str]:

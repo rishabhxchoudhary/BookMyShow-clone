@@ -145,7 +145,7 @@ def create_order(body: str, user_id: str) -> Dict[str, Any]:
             # This prevents double-booking during payment processing
             
             # Clear seat availability cache
-            redis_service._client.delete(f"seatmap:{show_id}")
+            redis_service.delete_key(f"seatmap:{show_id}")
             
             # Send order created event to SQS
             event_data = {

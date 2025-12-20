@@ -108,8 +108,8 @@ def get_seat_layout_for_theatre(theatre_id: str) -> List[Dict[str, Any]]:
 def get_permanently_unavailable_seats(show_id: str) -> List[str]:
     """Get permanently unavailable seats (broken, maintenance, etc.)"""
     # In production, this would come from database based on theatre/show
-    # For now, return some static broken seats
-    return ["A5", "B10", "C15"]  # Example broken seats
+    # For now, return some static broken seats (valid seats: A1-J10)
+    return ["A5", "B10", "C8"]  # Example broken seats
 
 def create_success_response(data: Any) -> Dict[str, Any]:
     """Create successful API response"""
@@ -139,6 +139,4 @@ def create_error_response(status_code: int, message: str) -> Dict[str, Any]:
             }
         })
     }
-    """Update hold with new seats"""
-    return create_error_response(501, "Update hold not yet implemented")
 

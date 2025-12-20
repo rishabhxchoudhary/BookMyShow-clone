@@ -265,17 +265,52 @@ class RedisService:
             pattern = "hold:*"
             keys = self._client.keys(pattern)
             expired_count = 0
-            
+
             for key in keys:
                 ttl = self._client.ttl(key)
                 if ttl == -2:  # Key doesn't exist
                     expired_count += 1
-            
+
             return expired_count
-            
+
         except Exception as e:
             logger.error("Failed to cleanup expired holds", error=e)
             return 0
+
+    def delete_key(self, key: str) -> bool:
+        """Delete a key from Redis"""
+        try:
+            if not self._client:
+                logger.warning("Redis client not available, cannot delete key")
+                return False
+            deleted = self._client.delete(key)
+            return deleted > 0
+        except Exception as e:
+            logger.error("Failed to delete key", error=e, extra={'key': key})
+            return False
+
+    def get_key(self, key: str) -> Optional[str]:
+        """Get a value from Redis"""
+        try:
+            if not self._client:
+                logger.warning("Redis client not available, cannot get key")
+                return None
+            return self._client.get(key)
+        except Exception as e:
+            logger.error("Failed to get key", error=e, extra={'key': key})
+            return None
+
+    def setex_key(self, key: str, ttl: int, value: str) -> bool:
+        """Set a key with expiration in Redis"""
+        try:
+            if not self._client:
+                logger.warning("Redis client not available, cannot set key")
+                return False
+            self._client.setex(key, ttl, value)
+            return True
+        except Exception as e:
+            logger.error("Failed to set key", error=e, extra={'key': key})
+            return False
 
 # Global Redis service instance
 redis_service = RedisService()

@@ -145,7 +145,7 @@ def create_hold(body: str, user_id: str) -> Dict[str, Any]:
             return create_error_response(500, "Failed to create hold")
         
         # Clear seat availability cache
-        redis_service._client.delete(f"seatmap:{show_id}")
+        redis_service.delete_key(f"seatmap:{show_id}")
         
         # Send hold created event to SQS for analytics/notifications
         event_data = {
@@ -272,7 +272,7 @@ def release_hold(hold_id: str, user_id: str) -> Dict[str, Any]:
         redis_service.store_hold(hold_data)
         
         # Clear seat availability cache
-        redis_service._client.delete(f"seatmap:{show_id}")
+        redis_service.delete_key(f"seatmap:{show_id}")
         
         # Send hold released event
         event_data = {
@@ -313,8 +313,8 @@ def release_hold(hold_id: str, user_id: str) -> Dict[str, Any]:
 def get_permanently_unavailable_seats(show_id: str) -> List[str]:
     """Get permanently unavailable seats for a show (broken seats, etc.)"""
     # This could be stored in database per show or configured per theatre
-    # For now, return a static list similar to the memory store implementation
-    return ["A5", "B10", "C15"]  # Example broken seats
+    # For now, return a static list similar to the memory store implementation (valid seats: A1-J10)
+    return ["A5", "B10", "C8"]  # Example broken seats
 
 def create_success_response(data: Any) -> Dict[str, Any]:
     """Create successful API response"""

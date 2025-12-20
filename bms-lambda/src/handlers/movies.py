@@ -50,10 +50,15 @@ def get_movies(query_params: Dict[str, str]) -> Dict[str, Any]:
         
         # Try to get from cache first
         cache_key = f"movies:list:{limit}:{offset}"
-        
+        cached_data = redis_service.get_key(cache_key)
+
+        if cached_data:
+            logger.info("Movies list served from cache", extra={'limit': limit, 'offset': offset})
+            return create_success_response(json.loads(cached_data))
+
         # Get movies from database
         movies = db_service.get_movies(limit=limit, offset=offset)
-        
+
         # Format response
         response_data = {
             "movies": movies,
@@ -63,10 +68,10 @@ def get_movies(query_params: Dict[str, str]) -> Dict[str, Any]:
                 "hasMore": len(movies) == limit
             }
         }
-        
+
         # Cache the response briefly
-        redis_service._client.setex(
-            cache_key, 
+        redis_service.setex_key(
+            cache_key,
             300,  # 5 minutes
             json.dumps(response_data, default=str)
         )
@@ -86,20 +91,20 @@ def get_movie_details(movie_id: str) -> Dict[str, Any]:
         
         # Try cache first
         cache_key = f"movie:details:{movie_id}"
-        cached_movie = redis_service._client.get(cache_key)
-        
+        cached_movie = redis_service.get_key(cache_key)
+
         if cached_movie:
             logger.info("Movie details served from cache", extra={'movie_id': movie_id})
             return create_success_response(json.loads(cached_movie))
-        
+
         # Get from database
         movie = db_service.get_movie_by_id(movie_id)
-        
+
         if not movie:
             return create_error_response(404, "Movie not found")
-        
+
         # Cache for 1 hour
-        redis_service._client.setex(
+        redis_service.setex_key(
             cache_key,
             3600,  # 1 hour
             json.dumps(movie, default=str)
@@ -128,8 +133,8 @@ def get_movie_shows(movie_id: str, query_params: Dict[str, str]) -> Dict[str, An
         
         # Try cache first
         cache_key = f"movie:shows:{movie_id}:{date}"
-        cached_shows = redis_service._client.get(cache_key)
-        
+        cached_shows = redis_service.get_key(cache_key)
+
         if cached_shows:
             logger.info("Movie shows served from cache", extra={
                 'movie_id': movie_id,
@@ -172,7 +177,7 @@ def get_movie_shows(movie_id: str, query_params: Dict[str, str]) -> Dict[str, An
         }
         
         # Cache for 1 minute (shows can change frequently)
-        redis_service._client.setex(
+        redis_service.setex_key(
             cache_key,
             60,  # 1 minute
             json.dumps(response_data, default=str)
